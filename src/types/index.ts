@@ -495,6 +495,16 @@ export interface GeneratedPaper {
    * never reachable from the End Semester workflow (Spec §19, §30).
    */
   questionBankSource?: QuestionBankSource;
+  /**
+   * The database identity the paper was generated for.
+   * A subject is identified ONLY by academic year + department + subject code;
+   * these three ids make that identity explicit and auditable.
+   */
+  subjectId?: string | null;
+  academicYearId?: string | null;
+  departmentId?: string | null;
+  /** The ORIGINAL question bank id the questions came from, when known. */
+  questionBankId?: string | null;
   /** Set only when questionBankSource === 'IAT_GENERATED'. */
   iatGeneratedBankId?: string | null;
   iatGeneratedBankName?: string | null;

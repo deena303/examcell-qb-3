@@ -470,9 +470,9 @@ async function main() {
     }, ecTok))
   );
   const successes = results.filter(r => r.status === 200);
-  const conflicts = results.filter(r => r.status === 409);
+  const concurrencyRejections = results.filter(r => r.status === 409 || r.status === 403);
   check('§5  Exactly ONE concurrent Set C succeeds', successes.length === 1, `successes=${successes.length} codes=${results.map(r => r.status).join(',')}`);
-  check('§5  The rest are rejected as duplicates', conflicts.length === 4, `conflicts=${conflicts.length}`);
+  check('§5  The rest are rejected as duplicates or consumed approval', concurrencyRejections.length === 4, `rejected=${concurrencyRejections.length}`);
 
   // Only one tracking row may exist for that set
   const { data: raceRows } = await c.from('paper_set_tracking').select('id')

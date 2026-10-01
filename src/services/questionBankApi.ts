@@ -286,13 +286,22 @@ export interface QuestionBankListRow {
 export interface QuestionBankFilters {
   academicYear?: string;
   department?: string;
+  /**
+   * Department allow-list for the COMMON flow. Sent as a comma-separated list
+   * so the bank is resolved inside exactly the chosen departments.
+   */
+  departments?: string[];
   subjectCode?: string;
 }
 
 function filterQuery(filters: QuestionBankFilters): string {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
-    if (value && value !== 'all') params.set(key, value);
+    if (Array.isArray(value)) {
+      if (value.length > 0) params.set(key, value.join(','));
+      return;
+    }
+    if (value && value !== 'all') params.set(key, String(value));
   });
   const query = params.toString();
   return query ? `?${query}` : '';

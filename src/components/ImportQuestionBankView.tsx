@@ -59,82 +59,238 @@ export const ImportQuestionBankView: React.FC = () => {
     academicYearsList,
     activeAcademicYearsList,
     selectedSubjectCode,
-    setSelectedSubjectCode,
     questions: existingQuestions,
     addQuestions,
     currentUser,
     setActiveTab,
     showToast,
-    authToken
+    authToken,
+    selectedAcademicYear: sharedAcademicYearLabel,
+    setSelectedAcademicYear: setSharedAcademicYear,
+    masterDataLoading,
+    refreshMasterData
   } = useApp();
 
-  // Academic Year selection — use the first active DB year as default
-  const defaultYear = activeAcademicYearsList[0]?.id || '';
-  const [selectedAcademicYearId, setSelectedAcademicYearId] = useState<string>(defaultYear);
+  // ============================================================
+  // CASCADING SELECTION: Academic Year → Department → Subject
+  // Every parent change MUST explicitly clear its children.
+  // ============================================================
 
-  // Sync default year when list loads
-  useEffect(() => {
-    if (!selectedAcademicYearId && activeAcademicYearsList.length > 0) {
-      setSelectedAcademicYearId(activeAcademicYearsList[0].id);
+  // Show ALL academic years (active + inactive) — stable memoized list
+  const years = useMemo(
+    () => (academicYearsList.length > 0 ? academicYearsList : activeAcademicYearsList),
+    [academicYearsList, activeAcademicYearsList]
+  );
+
+  // Track if initial default selection has completed
+  const initialSelectionMadeRef = useRef(false);
+  // Track if user manually made an in-component selection
+  const userSelectedRef = useRef(false);
+
+  // 1. ACADEMIC YEAR
+  // Prioritize globally shared academic year if present; fallback to first active or first year
+  const [selectedAcademicYearId, setSelectedAcademicYearId] = useState<string>(() => {
+    if (sharedAcademicYearLabel && years.length > 0) {
+      const match = years.find(y => y.year_label === sharedAcademicYearLabel);
+      if (match) {
+        initialSelectionMadeRef.current = true;
+        return match.id;
+      }
     }
-  }, [activeAcademicYearsList, selectedAcademicYearId]);
+    const def = (activeAcademicYearsList[0] || years[0])?.id || '';
+    if (def) {
+      initialSelectionMadeRef.current = true;
+    }
+    return def;
+  });
 
-  // Keep legacy selectedAcademicYear string in sync (for backward compat with upload logic)
-  const selectedAcademicYear = academicYearsList.find(y => y.id === selectedAcademicYearId)?.year_label || '';
-
-  // Department selection — use the first active DB department as default
-  const defaultDept = activeDepartmentsList[0]?.id || '';
-  const [selectedDepartmentId, setSelectedDepartmentId] = useState<string>(defaultDept);
-
-  // Sync default department when list loads
+  // Sync default year once when list first arrives from database
   useEffect(() => {
-    if (!selectedDepartmentId && activeDepartmentsList.length > 0) {
+    if (years.length === 0) return;
+    if (initialSelectionMadeRef.current && selectedAcademicYearId) return;
+
+    // Use sharedAcademicYearLabel if available
+    const match = sharedAcademicYearLabel ? years.find(y => y.year_label === sharedAcademicYearLabel) : null;
+    const target = match || activeAcademicYearsList[0] || years[0];
+
+    if (target) {
+      initialSelectionMadeRef.current = true;
+      setSelectedAcademicYearId(target.id);
+      if (!sharedAcademicYearLabel || sharedAcademicYearLabel !== target.year_label) {
+        setSharedAcademicYear(target.year_label);
+      }
+    }
+  }, [years, activeAcademicYearsList, selectedAcademicYearId, sharedAcademicYearLabel, setSharedAcademicYear]);
+
+  // Stable label string for backward compat with upload logic
+  const selectedAcademicYear = useMemo(
+    () => years.find(y => y.id === selectedAcademicYearId)?.year_label || '',
+    [years, selectedAcademicYearId]
+  );
+
+  // 2. DEPARTMENT — starts empty or with first dept; auto-initialised only once on first mount
+  const [selectedDepartmentId, setSelectedDepartmentId] = useState<string>(() => activeDepartmentsList[0]?.id || '');
+  const deptInitialisedRef = useRef(Boolean(activeDepartmentsList.length > 0));
+  useEffect(() => {
+    if (deptInitialisedRef.current) return;
+    if (activeDepartmentsList.length > 0) {
       setSelectedDepartmentId(activeDepartmentsList[0].id);
+      deptInitialisedRef.current = true;
     }
-  }, [activeDepartmentsList, selectedDepartmentId]);
+  }, [activeDepartmentsList]);
 
-  // Legacy selectedDepartment string (department code) for backward compat
   const selectedDepartment = selectedDepartmentId === 'COMMON'
     ? 'COMMON'
     : activeDepartmentsList.find(d => d.id === selectedDepartmentId)?.department_code || '';
 
   const [commonDepts, setCommonDepts] = useState<string[]>([]);
 
-  // Filter DB subjects by selected academic year ID + department ID (or common multi-select)
-  const filteredSubjects = useMemo(() => {
-    if (!dbSubjects || dbSubjects.length === 0) return [];
-    if (selectedDepartmentId === 'COMMON') {
-      // For COMMON scope, filter by selected common department codes
-      if (commonDepts.length === 0) return dbSubjects.filter(s => s.academic_year_id === selectedAcademicYearId && s.status === 'active');
-      const seen = new Set<string>();
-      return dbSubjects.filter(s => {
-        if (s.academic_year_id !== selectedAcademicYearId) return false;
-        if (s.status !== 'active') return false;
-        const deptCode = s.departments?.department_code || '';
-        if (!commonDepts.includes(deptCode)) return false;
-        if (seen.has(s.subject_code)) return false;
-        seen.add(s.subject_code);
-        return true;
-      });
+  // ---- Adopt Academic Year when changed externally in another section ----
+  // When another screen (Generate Paper, Question Bank, IAT) changes the global
+  // academic year this view switches to it AND cascade-resets dept + subject.
+  useEffect(() => {
+    if (!sharedAcademicYearLabel || years.length === 0) return;
+    const match = years.find((y) => y.year_label === sharedAcademicYearLabel);
+    if (!match || match.id === selectedAcademicYearId) return;
+
+    // External change from another screen
+    setSelectedAcademicYearId(match.id);
+    setSelectedDepartmentId('');
+    setLocalSubjectCode('');
+    setCommonDepts([]);
+    deptInitialisedRef.current = false;
+  }, [sharedAcademicYearLabel, years, selectedAcademicYearId]);
+
+  // Handler for user selecting an academic year in this dropdown
+  const handleAcademicYearChange = (newYearId: string) => {
+    if (!newYearId || newYearId === selectedAcademicYearId) return;
+    userSelectedRef.current = true;
+    initialSelectionMadeRef.current = true;
+    setSelectedAcademicYearId(newYearId);
+
+    const match = years.find((y) => y.id === newYearId);
+    if (match) {
+      setSharedAcademicYear(match.year_label);
     }
-    return dbSubjects.filter(s =>
-      s.academic_year_id === selectedAcademicYearId &&
-      s.department_id === selectedDepartmentId &&
-      s.status === 'active'
-    );
+
+    // CASCADE: clear dept and subject so user must pick a valid combination for new year
+    setSelectedDepartmentId('');
+    setLocalSubjectCode('');
+    setCommonDepts([]);
+    deptInitialisedRef.current = false;
+  };
+
+  // 3. SUBJECT — local state only (never writes to global context)
+  // Writing to global setSelectedSubjectCode caused a full re-render cascade across
+  // all context consumers every time year/dept changed, producing the page glitch.
+  const [localSubjectCode, setLocalSubjectCode] = useState<string>(selectedSubjectCode);
+
+  // ---- Subject loading states ----
+  // A request-counter ref prevents stale async responses from overwriting the
+  // subject list when the user rapidly changes year or department (race condition).
+  // Even though the current filter is synchronous, the counter pattern correctly
+  // handles any future async extension and eliminates stale effect races.
+  const subjectRequestCounterRef = useRef(0);
+  const [subjectsLoading, setSubjectsLoading] = useState(false);
+  const [subjectsLoadError, setSubjectsLoadError] = useState(false);
+  const [filteredSubjects, setFilteredSubjects] = useState<typeof dbSubjects>([]);
+
+  // Re-derive subjects whenever year, dept, common-dept selection, or the master
+  // subject list changes. Strict filter: academic_year_id AND department_id AND active.
+  useEffect(() => {
+    // Parent not yet selected — clear subjects immediately without showing an error.
+    if (!selectedAcademicYearId || !selectedDepartmentId) {
+      setFilteredSubjects([]);
+      setLocalSubjectCode('');
+      setSubjectsLoading(false);
+      setSubjectsLoadError(false);
+      return;
+    }
+
+    const requestId = ++subjectRequestCounterRef.current;
+    setSubjectsLoading(true);
+    setSubjectsLoadError(false);
+
+    try {
+      let result: typeof dbSubjects;
+
+      if (selectedDepartmentId === 'COMMON') {
+        if (commonDepts.length === 0) {
+          result = dbSubjects.filter(
+            s => s.academic_year_id === selectedAcademicYearId && s.status === 'active'
+          );
+        } else {
+          const seen = new Set<string>();
+          result = dbSubjects.filter(s => {
+            if (s.academic_year_id !== selectedAcademicYearId) return false;
+            if (s.status !== 'active') return false;
+            const deptCode = s.departments?.department_code || '';
+            if (!commonDepts.includes(deptCode)) return false;
+            if (seen.has(s.subject_code)) return false;
+            seen.add(s.subject_code);
+            return true;
+          });
+        }
+      } else {
+        // STRICT: academic_year_id AND department_id AND active = true
+        result = dbSubjects.filter(
+          s =>
+            s.academic_year_id === selectedAcademicYearId &&
+            s.department_id === selectedDepartmentId &&
+            s.status === 'active'
+        );
+      }
+
+      // Guard: discard if a newer invocation has already started.
+      if (requestId !== subjectRequestCounterRef.current) return;
+
+      setFilteredSubjects(result);
+
+      // Reset subject if it is no longer valid for the new year + dept.
+      setLocalSubjectCode(prev => {
+        if (result.length === 0) return '';
+        if (result.some(s => s.subject_code === prev)) return prev;
+        return result[0].subject_code; // auto-select first valid subject
+      });
+    } catch {
+      if (requestId !== subjectRequestCounterRef.current) return;
+      setSubjectsLoadError(true);
+      setFilteredSubjects([]);
+      setLocalSubjectCode('');
+    } finally {
+      if (requestId === subjectRequestCounterRef.current) {
+        setSubjectsLoading(false);
+      }
+    }
   }, [dbSubjects, selectedAcademicYearId, selectedDepartmentId, commonDepts]);
 
-  // Sync selectedSubjectCode if not in filtered list
-  useEffect(() => {
-    if (filteredSubjects.length > 0 && !filteredSubjects.some(s => s.subject_code === selectedSubjectCode)) {
-      setSelectedSubjectCode(filteredSubjects[0].subject_code);
-    }
-  }, [filteredSubjects, selectedSubjectCode, setSelectedSubjectCode]);
+  // Current Subject — identity validated against BOTH year AND dept IDs.
+  // A stale code that matched a different year or dept is treated as invalid (null).
+  const currentDbSubject = filteredSubjects.find(
+    s =>
+      s.subject_code === localSubjectCode &&
+      s.academic_year_id === selectedAcademicYearId &&
+      (selectedDepartmentId === 'COMMON' || s.department_id === selectedDepartmentId)
+  ) || null;
 
-  // Current Subject (from DB)
-  const currentDbSubject = dbSubjects.find(s => s.subject_code === selectedSubjectCode) || filteredSubjects[0];
-  // Legacy currentSubject shape for backward compat with upload/OCR logic
-  const currentSubject = subjects.find(s => s.code === selectedSubjectCode) || (currentDbSubject ? { id: currentDbSubject.id, code: currentDbSubject.subject_code, name: currentDbSubject.subject_name, department: currentDbSubject.departments?.department_code || '', semester: currentDbSubject.semester || '', regulation: currentDbSubject.regulation || '', totalQuestions: 0, status: 'Active' as const, units: [] } : null);
+  const currentSubject = currentDbSubject ? {
+    id: currentDbSubject.id,
+    code: currentDbSubject.subject_code,
+    name: currentDbSubject.subject_name,
+    department: currentDbSubject.departments?.department_code || selectedDepartment || '',
+    semester: currentDbSubject.semester || '',
+    regulation: currentDbSubject.regulation || '',
+    totalQuestions: 0,
+    status: 'Active' as const,
+    units: []
+  } : null;
+
+  // Upload is only allowed when the full valid triple is confirmed and subjects are loaded.
+  const canUpload =
+    Boolean(selectedAcademicYearId) &&
+    Boolean(selectedDepartmentId) &&
+    Boolean(currentSubject) &&
+    !subjectsLoading;
 
   // Upload & File State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -446,7 +602,7 @@ export const ImportQuestionBankView: React.FC = () => {
     const file = new File([blob], sample.fileName, { type: 'text/plain' });
 
     setSelectedFile(file);
-    setSelectedSubjectCode(sample.subjectCode);
+    setLocalSubjectCode(sample.subjectCode);
     setFileInfo({
       name: sample.fileName,
       size: (blob.size / 1024).toFixed(1) + ' KB',
@@ -838,20 +994,35 @@ export const ImportQuestionBankView: React.FC = () => {
             <select
               id="qb-academic-year-select"
               value={selectedAcademicYearId}
-              onChange={(e) => setSelectedAcademicYearId(e.target.value)}
-              className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-900 shadow-xs focus:border-[#D71945] focus:outline-hidden"
+              onChange={(e) => handleAcademicYearChange(e.target.value)}
+              disabled={masterDataLoading || years.length === 0}
+              className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-900 shadow-xs focus:border-[#D71945] focus:outline-hidden disabled:bg-slate-50 disabled:text-slate-400"
             >
-              {activeAcademicYearsList.length === 0 ? (
-                <option value="">Loading academic years...</option>
+              {years.length === 0 ? (
+                <option value="">
+                  {masterDataLoading ? 'Loading academic years...' : 'No academic years available'}
+                </option>
               ) : (
-                activeAcademicYearsList.map(yr => (
+                years.map(yr => (
                   <option key={yr.id} value={yr.id}>
                     {yr.year_label}
                   </option>
                 ))
               )}
             </select>
-            {!selectedAcademicYear && (
+            {!masterDataLoading && years.length === 0 && (
+              <div className="mt-1 flex items-center justify-between text-[11px] text-rose-600">
+                <span>Failed to load academic years.</span>
+                <button
+                  type="button"
+                  onClick={() => refreshMasterData()}
+                  className="font-bold underline hover:text-rose-800 cursor-pointer"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+            {years.length > 0 && !selectedAcademicYear && (
               <p className="text-[11px] text-rose-600 mt-1">Academic year is required</p>
             )}
           </div>
@@ -868,6 +1039,9 @@ export const ImportQuestionBankView: React.FC = () => {
               onChange={(e) => setSelectedDepartmentId(e.target.value)}
               className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-900 shadow-xs focus:border-[#D71945] focus:outline-hidden"
             >
+              {!selectedDepartmentId && (
+                <option value="">Select department...</option>
+              )}
               {activeDepartmentsList.map(dept => (
                 <option key={dept.id} value={dept.id}>
                   {dept.department_code} – {dept.department_name}
@@ -888,8 +1062,8 @@ export const ImportQuestionBankView: React.FC = () => {
             </label>
             <select
               id="qb-subject-select"
-              value={selectedSubjectCode}
-              onChange={(e) => setSelectedSubjectCode(e.target.value)}
+              value={localSubjectCode}
+              onChange={(e) => setLocalSubjectCode(e.target.value)}
               className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-900 shadow-xs focus:border-[#D71945] focus:outline-hidden"
             >
               {filteredSubjects.length === 0 ? (

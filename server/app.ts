@@ -16,6 +16,7 @@ import masterDataRouter from './routes/masterDataRoutes';
 import auditLogRouter from './routes/auditLogRoutes';
 import paperSetRouter from './routes/paperSetRoutes';
 import iatQuestionBankRouter from './routes/iatQuestionBankRoutes';
+import userManagementRouter from './routes/userManagementRoutes';
 import {
   authenticateGemini,
   buildGeminiHealthPayload,
@@ -123,7 +124,10 @@ app.get(['/', '/api'], (_req, res) => {
       iatSourceStats: 'GET /api/iat-question-banks/source-banks/:bankId/stats',
       iatPreview: 'POST /api/iat-question-banks/preview',
       iatCreate: 'POST /api/iat-question-banks',
-      iatList: 'GET /api/iat-question-banks'
+      iatList: 'GET /api/iat-question-banks',
+      users: 'GET /api/users',
+      createUser: 'POST /api/users',
+      changePassword: 'POST /api/users/:id/change-password'
     }
   });
 });
@@ -135,6 +139,7 @@ app.use('/api', questionBankRouter);
 app.use('/api', auditLogRouter);
 app.use('/api', paperSetRouter);
 app.use('/api', iatQuestionBankRouter);
+app.use('/api', userManagementRouter);
 
 // Also mount routes at root / as fallback so if a Netlify rewrite strips /api, the endpoint resolves seamlessly
 app.use('/', authRouter);
@@ -143,6 +148,7 @@ app.use('/', questionBankRouter);
 app.use('/', auditLogRouter);
 app.use('/', paperSetRouter);
 app.use('/', iatQuestionBankRouter);
+app.use('/', userManagementRouter);
 
 // Catch-all for undefined API routes — MUST ALWAYS return JSON, NEVER HTML (Requirement 8)
 app.use((_req, res) => {

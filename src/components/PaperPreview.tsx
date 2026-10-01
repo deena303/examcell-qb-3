@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { GeneratedPaper, Question, PaperQuestionItem } from '../types';
+import { COLLEGE_NAME, COLLEGE_NAME_TITLE, COLLEGE_LOCATION, formatPi, formatCo, formatBtl } from '../utils/paperConstants';
 import {
   exportToWordDocument,
   exportToHtmlFile,
@@ -200,8 +201,19 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
   ];
 
   // Dynamic font and spacing tokens
-  const qTextSize = fontDensity === 'compact' ? 'text-[12px]' : fontDensity === 'spacious' ? 'text-[14px]' : 'text-[13px]';
   const rowPadding = fontDensity === 'compact' ? 'py-1.5' : fontDensity === 'spacious' ? 'py-3' : 'py-2.5';
+
+  /**
+   * Question content typography.
+   *
+   * The question typeface is fixed to Times New Roman at 12px on screen (12pt
+   * in the printable/PDF/DOCX renderers) and the text is fully justified.
+   * Only the question TEXT is justified — the number, marks, BTL, CO and PI
+   * columns and the table headers are never justified.
+   */
+  const QUESTION_TEXT_CLASS = 'font-serif text-[12px] leading-relaxed text-justify';
+  /** Metadata cell: centred, never justified. */
+  const META_CELL_CLASS = 'text-center align-top font-mono text-[11px]';
 
   // =========================================================================
   // MULTI-SHEET PAGINATION MODEL
@@ -385,10 +397,18 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
     }
   };
 
-  const handleExportWord = () => {
+  const handleExportWord = async () => {
     setExportMenuOpen(false);
     setPrintModalOpen(false);
-    exportToWordDocument(paper);
+    // Real OOXML is built asynchronously; the audit entry is recorded only
+    // after the package has actually been produced.
+    try {
+      await exportToWordDocument(paper);
+    } catch (err) {
+      console.error('Word export failed:', err);
+      showToast('Word export failed. Please try again.');
+      return;
+    }
     // Spec §19 — record the download
     auditPaperDownload({
       paperCode: paper.paperCode,
@@ -420,15 +440,28 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
     setPrintModalOpen(false);
     try {
       const html = generatePrintablePaperHtml(paper);
-      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const win = window.open(url, '_blank');
+      // A blank document is used instead of a blob: URL. Browsers print the
+      // document URL in the header/footer, and a blob: URL would leak an
+      // opaque "blob:https://origin/<uuid>" string into the printed page.
+      const win = window.open('', '_blank');
       if (!win) {
         showToast('Browser blocked pop-up window. Downloading HTML file...');
         exportToHtmlFile(paper);
-      } else {
-        showToast('Opened question paper in new tab for unconstrained printing!');
+        return;
       }
+      win.document.open();
+      win.document.write(html);
+      win.document.close();
+      win.focus();
+      // Let the document finish laying out before opening the print dialog.
+      win.setTimeout(() => {
+        try {
+          win.print();
+        } catch {
+          showToast('Opened in a new tab. Use Ctrl+P to print.');
+        }
+      }, 400);
+      showToast('Opened question paper in new tab for unconstrained printing!');
     } catch (e) {
       exportToHtmlFile(paper);
     }
@@ -763,7 +796,7 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
 
                 <div className="text-center">
                   <h1 className="text-base sm:text-lg font-black tracking-wide uppercase">
-                    MOHAMED SATHAK A J COLLEGE OF ENGINEERING
+                    {COLLEGE_NAME}
                   </h1>
                   <p className="text-xs font-bold text-black uppercase tracking-wider">
                     (An Autonomous Institution – Affiliated to Anna University, Chennai)
@@ -860,7 +893,7 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
 
                 <div className="text-center mt-2">
                   <h1 className="text-base sm:text-lg font-black tracking-wide uppercase">
-                    Mohamed Sathak A J College of Engineering, Chennai - 603103
+                    {COLLEGE_NAME_TITLE}, {COLLEGE_LOCATION}
                   </h1>
                   <p className="text-xs font-bold text-black uppercase">
                     (An Autonomous Institution)
@@ -924,7 +957,7 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
             {sheet.hasContinuationHeader && (
               <div className="border-b-2 border-black pb-3 mb-6">
                 <div className="flex items-center justify-between text-xs font-bold uppercase">
-                  <span>MOHAMED SATHAK A J COLLEGE OF ENGINEERING (AUTONOMOUS)</span>
+                  <span>{COLLEGE_NAME} (AUTONOMOUS)</span>
                   <span>{paper.examType}</span>
                 </div>
                 <div className="flex items-center justify-between text-[11px] font-semibold text-slate-700 mt-1 border-t border-black pt-1">
@@ -954,7 +987,8 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
                       <th className="py-1 w-10 text-center">{isEndSem ? 'M' : 'Marks'}</th>
                       <th className="py-1 w-10 text-center">{isEndSem ? 'RBT' : 'BL'}</th>
                       <th className="py-1 w-10 text-center">CO</th>
-                      {!isEndSem && <th className="py-1 w-12 text-center">PI</th>}
+                      {/* PI is always the final metadata column. */}
+                      <th className="py-1 w-12 text-center">PI</th>
                       <th className="no-print py-1 w-14 text-right">Action</th>
                     </tr>
                   </thead>
@@ -962,13 +996,13 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
                     {sheet.partAQuestions.map((item) => (
                       <tr key={item.questionId} className="hover:bg-slate-50 question-tr">
                         <td className={`${rowPadding} font-bold align-top text-center`}>{item.questionNumber}.</td>
-                        <td className={`${rowPadding} pr-4 align-top leading-relaxed font-serif ${qTextSize}`}>
+                        <td className={`${rowPadding} pr-4 ${QUESTION_TEXT_CLASS}`}>
                           {item.question.questionText}
                         </td>
                         <td className={`${rowPadding} text-center font-bold align-top`}>2</td>
-                        <td className={`${rowPadding} text-center font-mono align-top text-[11px]`}>{normalizeBloomsLevel(item.question.bloomsLevel)}</td>
-                        <td className={`${rowPadding} text-center font-mono align-top text-[11px]`}>{item.question.co || 'CO' + item.question.unit}</td>
-                        {!isEndSem && <td className={`${rowPadding} text-center font-mono align-top text-[10px] text-gray-700`}>{item.question.pi}</td>}
+                        <td className={`${rowPadding} ${META_CELL_CLASS}`}>{normalizeBloomsLevel(item.question.bloomsLevel)}</td>
+                        <td className={`${rowPadding} ${META_CELL_CLASS}`}>{formatCo(item.question.co)}</td>
+                        <td className={`${rowPadding} ${META_CELL_CLASS} text-gray-700`}>{formatPi(item.question.pi)}</td>
                         <td className={`no-print ${rowPadding} text-right align-top`}>
                           <button
                             onClick={() => handleOpenReplace(item)}
@@ -1010,10 +1044,11 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
                         <tr className="border-b border-black text-[10px] uppercase font-bold text-black">
                           <th className="py-1 w-8">Q.No</th>
                           <th className="py-1">Question</th>
+                          <th className="py-1 w-10 text-center">Marks</th>
                           <th className="py-1 w-10 text-center">BL</th>
                           <th className="py-1 w-10 text-center">CO</th>
+                          {/* PI is always the final metadata column. */}
                           <th className="py-1 w-12 text-center">PI</th>
-                          <th className="py-1 w-10 text-right">Marks</th>
                           <th className="no-print py-1 w-14 text-right">Action</th>
                         </tr>
                       </thead>
@@ -1021,13 +1056,13 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
                         {sec.questions.map((item) => (
                           <tr key={item.questionId} className="hover:bg-slate-50 question-tr">
                             <td className={`${rowPadding} font-bold align-top`}>{item.questionNumber}.</td>
-                            <td className={`${rowPadding} pr-4 align-top leading-relaxed font-serif ${qTextSize} whitespace-pre-line`}>
+                            <td className={`${rowPadding} pr-4 ${QUESTION_TEXT_CLASS} whitespace-pre-line`}>
                               {item.question.questionText}
                             </td>
-                            <td className={`${rowPadding} text-center font-mono align-top text-[11px]`}>{item.question.bloomsLevel}</td>
-                            <td className={`${rowPadding} text-center font-mono align-top text-[11px]`}>{item.question.co}</td>
-                            <td className={`${rowPadding} text-center font-mono align-top text-[10px] text-gray-700`}>{item.question.pi}</td>
                             <td className={`${rowPadding} text-right font-bold align-top`}>13</td>
+                            <td className={`${rowPadding} ${META_CELL_CLASS}`}>{formatBtl(item.question.bloomsLevel)}</td>
+                            <td className={`${rowPadding} ${META_CELL_CLASS}`}>{formatCo(item.question.co)}</td>
+                            <td className={`${rowPadding} ${META_CELL_CLASS} text-gray-700`}>{formatPi(item.question.pi)}</td>
                             <td className={`no-print ${rowPadding} text-right align-top`}>
                               <button
                                 onClick={() => handleOpenReplace(item)}
@@ -1067,6 +1102,8 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
                       <th className="py-1 w-10 text-center">M</th>
                       <th className="py-1 w-10 text-center">RBT</th>
                       <th className="py-1 w-10 text-center">CO</th>
+                      {/* PI is always the final metadata column. */}
+                      <th className="py-1 w-12 text-center">PI</th>
                       <th className="no-print py-1 w-14 text-right">Action</th>
                     </tr>
                   </thead>
@@ -1077,19 +1114,21 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
                         <React.Fragment key={item.questionId}>
                           {isOptionB && (
                             <tr className="question-tr">
-                              <td colSpan={6} className="py-1 text-center font-bold text-[11px] text-black bg-slate-50">
-                                — (OR) —
+                              <td colSpan={7} className="py-1 text-center font-bold text-[11px] text-black bg-slate-50">
+                                - (OR) -
                               </td>
                             </tr>
                           )}
                           <tr className="hover:bg-slate-50 question-tr">
                             <td className={`${rowPadding} font-bold align-top text-center`}>{item.questionNumber})</td>
-                            <td className={`${rowPadding} pr-4 align-top leading-relaxed font-serif ${qTextSize} whitespace-pre-line`}>
+                            <td className={`${rowPadding} pr-4 ${QUESTION_TEXT_CLASS} whitespace-pre-line`}>
                               {item.question.questionText}
                             </td>
                             <td className={`${rowPadding} text-center font-bold align-top`}>13</td>
-                            <td className={`${rowPadding} text-center font-mono align-top text-[11px]`}>{normalizeBloomsLevel(item.question.bloomsLevel)}</td>
-                            <td className={`${rowPadding} text-center font-mono align-top text-[11px]`}>{item.question.co || 'CO' + item.question.unit}</td>
+                            <td className={`${rowPadding} ${META_CELL_CLASS}`}>{normalizeBloomsLevel(item.question.bloomsLevel)}</td>
+                            <td className={`${rowPadding} ${META_CELL_CLASS}`}>{formatCo(item.question.co)}</td>
+                            <td className={`${rowPadding} ${META_CELL_CLASS} text-gray-700`}>{formatPi(item.question.pi)}</td>
+
                             <td className={`no-print ${rowPadding} text-right align-top`}>
                               <button
                                 onClick={() => handleOpenReplace(item)}
@@ -1127,6 +1166,8 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
                       <th className="py-1 w-10 text-center">M</th>
                       <th className="py-1 w-10 text-center">RBT</th>
                       <th className="py-1 w-10 text-center">CO</th>
+                      {/* PI is always the final metadata column. */}
+                      <th className="py-1 w-12 text-center">PI</th>
                       <th className="no-print py-1 w-14 text-right">Action</th>
                     </tr>
                   </thead>
@@ -1135,19 +1176,21 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
                       <React.Fragment key={item.questionId}>
                         {item.isOrOptionB && (
                           <tr className="question-tr">
-                            <td colSpan={6} className="py-1 text-center font-bold text-[11px] text-black bg-slate-50">
-                              — (OR) —
+                            <td colSpan={7} className="py-1 text-center font-bold text-[11px] text-black bg-slate-50">
+                              - (OR) -
                             </td>
                           </tr>
                         )}
                         <tr className="hover:bg-slate-50 question-tr">
                           <td className={`${rowPadding} font-bold align-top text-center`}>{item.questionNumber})</td>
-                          <td className={`${rowPadding} pr-4 align-top leading-relaxed font-serif ${qTextSize} whitespace-pre-line`}>
+                          <td className={`${rowPadding} pr-4 ${QUESTION_TEXT_CLASS} whitespace-pre-line`}>
                             {item.question.questionText}
                           </td>
                           <td className={`${rowPadding} text-center font-bold align-top`}>15</td>
-                          <td className={`${rowPadding} text-center font-mono align-top text-[11px]`}>{normalizeBloomsLevel(item.question.bloomsLevel)}</td>
-                          <td className={`${rowPadding} text-center font-mono align-top text-[11px]`}>{item.question.co || 'CO5'}</td>
+                          <td className={`${rowPadding} ${META_CELL_CLASS}`}>{normalizeBloomsLevel(item.question.bloomsLevel)}</td>
+                          <td className={`${rowPadding} ${META_CELL_CLASS}`}>{formatCo(item.question.co)}</td>
+                          <td className={`${rowPadding} ${META_CELL_CLASS} text-gray-700`}>{formatPi(item.question.pi)}</td>
+
                           <td className={`no-print ${rowPadding} text-right align-top`}>
                             <button
                               onClick={() => handleOpenReplace(item)}

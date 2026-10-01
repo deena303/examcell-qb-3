@@ -20,8 +20,24 @@ export const Header: React.FC<HeaderProps> = ({ mobileOpen, setMobileOpen }) => 
     currentUser,
     logout,
     isSuperAdminPortal,
-    isPrincipalPortal
+    isPrincipalPortal,
+    activeAcademicYearsList,
+    selectedAcademicYear
   } = useApp();
+
+  /**
+   * The academic year shown here is the one the WORKFLOW selected — the same
+   * value the Generate Paper wizard, Question Bank, IAT generator and
+   * Generated Banks screens use. Nothing is derived locally and no year is
+   * hardcoded, so the header can never disagree with the workflow.
+   *
+   * When no year has been chosen yet we show the newest ACTIVE year from the
+   * database purely as a hint, clearly marked as "not selected".
+   */
+  const workflowYear = (selectedAcademicYear || '').trim();
+  const newestActiveYear = activeAcademicYearsList?.[0]?.year_label || '';
+  const yearLabel = workflowYear || newestActiveYear;
+  const yearIsHint = !workflowYear && Boolean(newestActiveYear);
 
   const [showNotifications, setShowNotifications] = useState(false);
 
@@ -85,10 +101,16 @@ export const Header: React.FC<HeaderProps> = ({ mobileOpen, setMobileOpen }) => 
       <div className="flex items-center gap-3 md:gap-4">
         {/* Academic Year Banner (Exam Cell only) */}
         {!isSuperAdminPortal && !isPrincipalPortal && (
-          <div className="hidden lg:flex items-center gap-2 rounded-xl border border-[#E5E7EB] bg-[#F7F8FA] px-3 py-1.5 text-xs text-[#64748B]">
+          <div
+            className="hidden lg:flex items-center gap-2 rounded-xl border border-[#E5E7EB] bg-[#F7F8FA] px-3 py-1.5 text-xs text-[#64748B]"
+            title={workflowYear ? 'Academic year selected for the current workflow' : 'No academic year selected yet'}
+          >
             <Calendar className="h-3.5 w-3.5 text-[#1976D2]" />
             <span>Academic Year:</span>
-            <span className="font-semibold text-[#111827]">2024–2025 (Even Semester)</span>
+            <span className={`font-semibold ${yearIsHint ? 'italic text-[#94A3B8]' : 'text-[#111827]'}`}>
+              {yearLabel || 'Not selected'}
+            </span>
+            {yearIsHint && <span className="text-[10px] text-[#94A3B8]">(default)</span>}
           </div>
         )}
 

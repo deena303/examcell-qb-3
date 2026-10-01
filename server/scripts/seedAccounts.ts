@@ -17,13 +17,13 @@ const accounts = [
     email: 'examcell@msajce-edu.in',
     password: 'Msajce@1234',
     role: 'EXAM_CELL' as const,
-    name: 'Dr. R. Vignesh Kumar'
+    name: 'Msajce'
   },
   {
     email: 'examcell@examcell-edu.in',
     password: 'Msajce@1234',
     role: 'EXAM_CELL' as const,
-    name: 'Dr. R. Vignesh Kumar'
+    name: 'Msajce'
   },
   {
     email: 'superadmin@examcell-edu.in',

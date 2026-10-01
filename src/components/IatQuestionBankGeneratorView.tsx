@@ -17,6 +17,7 @@ import {
   ChevronUp
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
+import { formatPi, formatCo, formatBtl } from '../utils/paperConstants';
 import type {
   IatGeneratedBank,
   IatPreview,
@@ -79,7 +80,9 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
     showToast,
     setActiveTab,
     iatGeneratorPrefill,
-    setIatGeneratorPrefill
+    setIatGeneratorPrefill,
+    selectedAcademicYear,
+    setSelectedAcademicYear
   } = useApp();
 
   const accent = isSuperAdminPortal ? 'purple' : 'rose';
@@ -125,7 +128,8 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
   // ---- UI state ----
   const [previewExpanded, setPreviewExpanded] = useState(true);
 
-  const years = activeAcademicYearsList.length > 0 ? activeAcademicYearsList : academicYearsList;
+  // Show ALL academic years (active + inactive) so question banks for any year are accessible.
+  const years = academicYearsList.length > 0 ? academicYearsList : activeAcademicYearsList;
   const depts = activeDepartmentsList.length > 0 ? activeDepartmentsList : [];
 
   // ---- Reset downstream on bank change ----
@@ -149,6 +153,15 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
    * exists inside the given Academic Year + Department, so the prefill can
    * never smuggle in a mismatched combination.
    */
+  // ---- Academic year is shared application state ----
+  // The generator adopts the academic year already chosen elsewhere (Generate
+  // Paper, Question Bank, Import) instead of starting blank, so the whole
+  // workflow operates on one academic year.
+  useEffect(() => {
+    if (!selectedAcademicYear) return;
+    setAcademicYear((prev) => (prev === selectedAcademicYear ? prev : selectedAcademicYear));
+  }, [selectedAcademicYear]);
+
   useEffect(() => {
     if (!iatGeneratorPrefill) return;
     const { academicYear: year, department: dept, subjectCode: code, sourceBankId: bankId } = iatGeneratorPrefill;
@@ -481,7 +494,7 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
             {questions.map((q, idx) => (
               <tr key={`${q.sourceQuestionId}-${idx}`} className="align-top hover:bg-[#F9FAFB]">
                 <td className="px-3 py-2.5 font-black text-[#64748B]">{idx + 1}</td>
-                <td className="max-w-md px-3 py-2.5 font-medium leading-relaxed">{q.questionText}</td>
+                <td className="max-w-md px-3 py-2.5 text-justify font-serif text-[12px] leading-relaxed">{q.questionText}</td>
                 <td className="px-3 py-2.5 font-bold">{q.unit ?? '—'}</td>
                 <td className="px-3 py-2.5">
                   <span
@@ -497,9 +510,10 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
                   </span>
                 </td>
                 <td className="px-3 py-2.5 font-bold">{q.marks ?? '—'}</td>
-                <td className="px-3 py-2.5 font-mono text-[11px] font-bold">{q.btl || q.bloomsLevel || '—'}</td>
-                <td className="px-3 py-2.5 font-mono text-[11px] font-bold">{q.co || '—'}</td>
-                <td className="px-3 py-2.5 font-mono text-[11px] font-bold">{q.pi || '—'}</td>
+                <td className="px-3 py-2.5 font-mono text-[11px] font-bold">{formatBtl(q.btl || q.bloomsLevel)}</td>
+                <td className="px-3 py-2.5 font-mono text-[11px] font-bold">{formatCo(q.co)}</td>
+                {/* PI comes from this question's own record; "-" when it has none. */}
+                <td className="px-3 py-2.5 font-mono text-[11px] font-bold">{formatPi(q.pi)}</td>
               </tr>
             ))}
             {questions.length === 0 && (
@@ -627,7 +641,11 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
             <select
               value={academicYear}
               onChange={(e) => {
-                setAcademicYear(e.target.value);
+                const nextYear = e.target.value;
+                setAcademicYear(nextYear);
+                // Publish the choice so the header and the other year-scoped
+                // screens show the same academic year.
+                setSelectedAcademicYear(nextYear);
                 setSubjectCode('');
                 setSourceBankId('');
                 resetFromBankChange();

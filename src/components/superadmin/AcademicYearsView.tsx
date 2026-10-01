@@ -89,7 +89,7 @@ export const AcademicYearsView: React.FC = () => {
             value={newLabel}
             onChange={e => setNewLabel(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') setAddingNew(false); }}
-            placeholder="e.g. 2026-2027"
+            placeholder="e.g. 2026-2030"
             className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-[#111827] focus:border-purple-400 focus:ring-2 focus:ring-purple-100 outline-none"
           />
           <button onClick={handleAdd} disabled={saving} className="flex items-center gap-1 rounded-lg bg-purple-700 px-3 py-2 text-xs font-bold text-white hover:bg-purple-800 disabled:opacity-60 transition-colors">

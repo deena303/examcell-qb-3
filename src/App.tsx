@@ -33,6 +33,7 @@ import { AuditLogView } from './components/AuditLogView';
 // IAT Question Bank Generator (Spec §1, §20, §21) — IAT-only, never End Semester
 import { IatQuestionBankGeneratorView } from './components/IatQuestionBankGeneratorView';
 import { IatGeneratedBanksView } from './components/IatGeneratedBanksView';
+import { ChangePasswordView } from './components/ChangePasswordView';
 
 // Pre-login Meet the Team page (shown when clicking "Meet the team" on login page)
 // handled by a separate state since user isn't authenticated
@@ -45,7 +46,7 @@ const PreLoginMeetTheTeam: React.FC<{ onBack: () => void }> = ({ onBack }) => (
 );
 
 const AppContent: React.FC = () => {
-  const { isAuthenticated, activeTab, setActiveTab, isSuperAdminPortal, isPrincipalPortal } = useApp();
+  const { isAuthenticated, activeTab, setActiveTab, isSuperAdminPortal, isPrincipalPortal, mustChangePassword } = useApp();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [showPreLoginTeam, setShowPreLoginTeam] = useState(false);
 
@@ -200,35 +201,48 @@ const AppContent: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#F7F8FA] font-sans text-[#111827] flex flex-col">
-      {/* Fixed Sidebar */}
-      <Sidebar mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} />
+      {/* If user must change password, show ONLY that screen — no portal access */}
+      {isAuthenticated && mustChangePassword ? (
+        <div className="min-h-screen bg-[#F7F8FA] flex flex-col">
+          <Header />
+          <main className="flex-1 p-4 sm:p-6 lg:p-8">
+            <ChangePasswordView />
+          </main>
+          <Toast />
+        </div>
+      ) : (
+        <>
+          {/* Fixed Sidebar */}
+          <Sidebar mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} />
 
-      {/* Main Content Area */}
-      <div className="flex flex-1 flex-col lg:pl-72">
-        {/* Top Header */}
-        <Header mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} />
+          {/* Main Content Area */}
+          <div className="flex flex-1 flex-col lg:pl-72">
+            {/* Top Header */}
+            <Header mobileOpen={mobileOpen} setMobileOpen={setMobileOpen} />
 
-      {/* Dynamic Page Content */}
-      <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
-        {isIatTab && !iatAllowed ? (
-          <div className="rounded-3xl border border-red-200 bg-red-50 p-8 text-center">
-            <h2 className="text-sm font-black text-red-900">Access Denied</h2>
-            <p className="mt-1 text-xs text-red-700">
-              The IAT Question Bank Generator is available only to the Super Admin and Exam Cell portals.
-            </p>
+          {/* Dynamic Page Content */}
+          <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+            {isIatTab && !iatAllowed ? (
+              <div className="rounded-3xl border border-red-200 bg-red-50 p-8 text-center">
+                <h2 className="text-sm font-black text-red-900">Access Denied</h2>
+                <p className="mt-1 text-xs text-red-700">
+                  The IAT Question Bank Generator is available only to the Super Admin and Exam Cell portals.
+                </p>
+              </div>
+            ) : isPrincipalPortal ? (
+              renderPrincipalContent()
+            ) : isSuperAdminPortal ? (
+              renderSuperAdminContent()
+            ) : (
+              renderExamCellContent()
+            )}
+          </main>
           </div>
-        ) : isPrincipalPortal ? (
-          renderPrincipalContent()
-        ) : isSuperAdminPortal ? (
-          renderSuperAdminContent()
-        ) : (
-          renderExamCellContent()
-        )}
-      </main>
-      </div>
 
-      {/* Global Toast Notification */}
-      <Toast />
+          {/* Global Toast Notification */}
+          <Toast />
+        </>
+      )}
     </div>
   );
 };

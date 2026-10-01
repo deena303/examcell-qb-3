@@ -346,7 +346,9 @@ router.post('/paper-sets/paper', requireAuth, requireRole('EXAM_CELL', 'SUPER_AD
       paperCode, subjectId, subjectCode, subjectName, departmentId, academicYearId,
       examType, setLetter, setDisplayName, examDate, duration, maxMarks,
       semester, regulation, principalRequestId, localPaperId,
-      questionBankSource, iatGeneratedBankId, iatGeneratedBankName
+      questionBankSource, iatGeneratedBankId, iatGeneratedBankName,
+      questionBankId,
+      questions
     } = req.body;
 
     if (!paperCode || !examType || !setLetter) {
@@ -372,10 +374,14 @@ router.post('/paper-sets/paper', requireAuth, requireRole('EXAM_CELL', 'SUPER_AD
 
     const normalizedSet = setLetter.toUpperCase();
     let resolvedSubjectCode = subjectCode || '';
+    let resolvedAcademicYear = req.body.academicYear || '';
+    let resolvedDepartmentCode = req.body.department || '';
 
     if (subjectId && academicYearId && departmentId) {
       const master = await resolveIdentity({ subjectId, academicYearId, departmentId });
       resolvedSubjectCode = subjectCode || master.subjectCode || '';
+      resolvedAcademicYear = resolvedAcademicYear || master.academicYear || '';
+      resolvedDepartmentCode = resolvedDepartmentCode || master.departmentCode || '';
       const identity: GenerationIdentity = {
         subjectId,
         academicYearId,
@@ -394,6 +400,15 @@ router.post('/paper-sets/paper', requireAuth, requireRole('EXAM_CELL', 'SUPER_AD
           requiresApproval: authorization.requiresApproval,
           authorization
         });
+      }
+    } else {
+      if (academicYearId && !resolvedAcademicYear) {
+        const { data: yr } = await client.from('academic_years').select('year_label').eq('id', academicYearId).maybeSingle();
+        if (yr?.year_label) resolvedAcademicYear = yr.year_label;
+      }
+      if (departmentId && !resolvedDepartmentCode) {
+        const { data: dp } = await client.from('departments').select('department_code').eq('id', departmentId).maybeSingle();
+        if (dp?.department_code) resolvedDepartmentCode = dp.department_code;
       }
     }
 
@@ -417,6 +432,8 @@ router.post('/paper-sets/paper', requireAuth, requireRole('EXAM_CELL', 'SUPER_AD
         subject_name: subjectName || null,
         department_id: departmentId || null,
         academic_year_id: academicYearId || null,
+        academic_year: resolvedAcademicYear || null,
+        department: resolvedDepartmentCode || null,
         exam_type: examType,
         set_letter: normalizedSet,
         set_name: `Set ${normalizedSet}`,
@@ -439,12 +456,14 @@ router.post('/paper-sets/paper', requireAuth, requireRole('EXAM_CELL', 'SUPER_AD
         approved_at: principalRequestId ? new Date().toISOString() : null,
         question_bank_source: bankSource,
         iat_generated_bank_id: resolvedIatBankId,
-        iat_generated_bank_name: resolvedIatBankId ? (iatGeneratedBankName || null) : null
+        iat_generated_bank_name: resolvedIatBankId ? (iatGeneratedBankName || null) : null,
+        ...(questionBankId ? { question_bank_id: questionBankId } : {})
       })
       .select()
       .single();
 
     if (error) {
+      console.error('[paper-sets] generated_papers insert error details:', JSON.stringify(error));
       if (error.code === '23505' || error.message?.includes('Duplicate set blocked')) {
         return res.status(409).json({
           error: `Set ${normalizedSet} already exists for this Academic Year + Department + Subject + Exam Type.`,
@@ -455,7 +474,48 @@ router.post('/paper-sets/paper', requireAuth, requireRole('EXAM_CELL', 'SUPER_AD
       return res.status(500).json({ error: error.message });
     }
 
-    return res.status(201).json({ success: true, paper: inserted, fileName });
+    // ---- the questions this paper actually selected ----
+    // Stored as references to the real questions, never copies, and never mixed
+    // across sources: one paper uses either the original bank or one
+    // scrutinized/reduced bank. `generated_paper_questions` arrives with
+    // migration 016; until then the paper is still saved and reported as such.
+    let questionSelections = 0;
+    let questionMappingsAvailable = true;
+    if (Array.isArray(questions) && questions.length > 0) {
+      const rows = buildPaperQuestionRows({
+        paperId: inserted.id,
+        paperCode,
+        bankSource,
+        questionBankId: questionBankId || null,
+        questions
+      });
+      const { error: mappingError } = await client.from('generated_paper_questions').insert(rows);
+      if (mappingError) {
+        if (isMissingRelation(mappingError)) {
+          questionMappingsAvailable = false;
+          console.warn('[paper-sets] generated_paper_questions is not created yet (migration 016). Paper saved without question selections.');
+        } else {
+          // Never leave a half-saved paper behind: undo the insert so the UI
+          // can tell the user nothing was saved.
+          await client.from('generated_papers').delete().eq('id', inserted.id);
+          console.error('[paper-sets] generated_paper_questions insert failed:', mappingError.message);
+          return res.status(500).json({
+            error: `The paper could not be saved because its question selections were rejected: ${mappingError.message}`,
+            code: 'QUESTION_SELECTIONS_FAILED'
+          });
+        }
+      } else {
+        questionSelections = rows.length;
+      }
+    }
+
+    return res.status(201).json({
+      success: true,
+      paper: inserted,
+      fileName,
+      questionSelections,
+      questionMappingsAvailable
+    });
   } catch (err: any) {
     console.error('[paper-sets] paper persist error:', err);
     return res.status(500).json({ error: err.message });
@@ -1140,6 +1200,180 @@ router.get('/principals', requireAuth, async (_req: AuthenticatedRequest, res: R
 });
 
 // ====================================================================
+// GET /api/paper-sets/papers
+//
+// The "Generated Question Papers" archive, read straight from Supabase.
+// This is the only source the page renders — there is no mock or
+// localStorage fallback.
+//
+// A subject is NEVER identified by subject_code alone: a paper belongs to the
+// exact academic_year_id + department_id + subject_id triple, and the filters
+// below use those same ids so the same code under another department or year
+// can never leak into the list.
+//
+// Query (all optional):
+//   ?academicYearId=&departmentId=&subjectId=&examType=&setLetter=&status=&search=
+// ====================================================================
+router.get('/paper-sets/papers', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isSupabaseConfigured()) {
+      return res.json({ papers: [], count: 0, databaseConfigured: false, questionMappingsAvailable: false });
+    }
+
+    const client = getSupabaseClient();
+    const { academicYearId, departmentId, subjectId, examType, setLetter, status, search } = req.query as Record<string, string>;
+
+    let query = client.from('generated_papers').select('*');
+    if (academicYearId) query = query.eq('academic_year_id', academicYearId);
+    if (departmentId) query = query.eq('department_id', departmentId);
+    if (subjectId) query = query.eq('subject_id', subjectId);
+    if (examType) query = query.eq('exam_type', examType);
+    if (setLetter) query = query.eq('set_letter', setLetter.toUpperCase());
+    if (status) query = query.eq('status', status);
+    if (search) {
+      const term = `%${search.replace(/[%_]/g, '')}%`;
+      // paper_code / subject_code / subject_name / set_display_name
+      query = query.or(`paper_code.ilike.${term},subject_code.ilike.${term},subject_name.ilike.${term},set_display_name.ilike.${term}`);
+    }
+    const { data: paperRows, error: paperErr } = await query.order('generated_at', { ascending: false, nullsFirst: false });
+    if (paperErr) throw paperErr;
+
+    const papers = paperRows || [];
+
+    // ---- question selections actually used by each paper ----
+    // The table arrives with migration 016; until it is applied the archive
+    // still works, it just reports no selections rather than failing.
+    let questionMappingsAvailable = false;
+    const questionsByPaper = new Map<string, any[]>();
+    if (papers.length > 0) {
+      const probe = await client.from('generated_paper_questions').select('paper_id').limit(1);
+      questionMappingsAvailable = !probe.error;
+      if (questionMappingsAvailable) {
+        const { data: mappings, error: mapErr } = await client
+          .from('generated_paper_questions')
+          .select('*')
+          .in('paper_id', papers.map((p: any) => p.id))
+          .order('order_index', { ascending: true });
+        if (mapErr) throw mapErr;
+        for (const row of mappings || []) {
+          const list = questionsByPaper.get(row.paper_id) || [];
+          list.push(row);
+          questionsByPaper.set(row.paper_id, list);
+        }
+      }
+    }
+
+    // ---- resolve labels for the id-based identity columns ----
+    const yearIds = unique(papers.map((p: any) => p.academic_year_id).filter(Boolean));
+    const deptIds = unique(papers.map((p: any) => p.department_id).filter(Boolean));
+    const subjectIds = unique(papers.map((p: any) => p.subject_id).filter(Boolean));
+
+    const [yearsRes, deptsRes, subjectsRes] = await Promise.all([
+      yearIds.length
+        ? client.from('academic_years').select('id, year_label, start_year, end_year').in('id', yearIds)
+        : Promise.resolve({ data: [] as any[], error: null }),
+      deptIds.length
+        ? client.from('departments').select('id, department_code, department_name, short_name').in('id', deptIds)
+        : Promise.resolve({ data: [] as any[], error: null }),
+      subjectIds.length
+        ? client.from('subjects').select('id, subject_code, subject_name, semester, regulation, year_of_study').in('id', subjectIds)
+        : Promise.resolve({ data: [] as any[], error: null })
+    ]);
+    for (const r of [yearsRes, deptsRes, subjectsRes]) if (r.error) throw r.error;
+
+    const yearById = new Map((yearsRes.data || []).map((y: any) => [y.id, y]));
+    const deptById = new Map((deptsRes.data || []).map((d: any) => [d.id, d]));
+    const subjectById = new Map((subjectsRes.data || []).map((s: any) => [s.id, s]));
+
+    const payload = papers.map((p: any) => {
+      const year = p.academic_year_id ? yearById.get(p.academic_year_id) : null;
+      const dept = p.department_id ? deptById.get(p.department_id) : null;
+      const subject = p.subject_id ? subjectById.get(p.subject_id) : null;
+      const selections = questionsByPaper.get(p.id) || [];
+
+      return {
+        id: p.id,
+        paper_code: p.paper_code,
+        // --- identity: the triple, plus the labels it resolves to ---
+        academic_year_id: p.academic_year_id ?? null,
+        department_id: p.department_id ?? null,
+        subject_id: p.subject_id ?? null,
+        academic_year: p.academic_year ?? year?.year_label ?? null,
+        academic_year_label: year?.year_label ?? p.academic_year ?? null,
+        department: p.department ?? dept?.department_code ?? null,
+        department_label: dept?.department_code ?? p.department ?? null,
+        department_name: dept?.department_name ?? null,
+        subject_code: p.subject_code ?? subject?.subject_code ?? null,
+        subject_name: p.subject_name ?? subject?.subject_name ?? null,
+        subject_code_label: subject?.subject_code ?? p.subject_code ?? null,
+        subject_name_label: subject?.subject_name ?? p.subject_name ?? null,
+        semester: p.semester ?? subject?.semester ?? null,
+        regulation: p.regulation ?? subject?.regulation ?? null,
+        year_of_study: subject?.year_of_study ?? null,
+
+        // --- paper facts ---
+        exam_type: p.exam_type ?? null,
+        set_letter: p.set_letter ?? null,
+        set_name: p.set_name ?? (p.set_letter ? `Set ${p.set_letter}` : null),
+        set_display_name: p.set_display_name ?? null,
+        file_name: p.file_name ?? null,
+        exam_date: p.exam_date ?? null,
+        duration: p.duration ?? null,
+        max_marks: p.max_marks ?? null,
+        status: p.status ?? 'Draft',
+
+        // --- source bank: 'ORIGINAL' | 'IAT_GENERATED' ---
+        question_bank_source: p.question_bank_source ?? null,
+        question_bank_type: p.question_bank_type ?? (p.question_bank_source === 'IAT_GENERATED' ? 'reduced' : 'original'),
+        question_bank_id: p.question_bank_id ?? null,
+        iat_generated_bank_id: p.iat_generated_bank_id ?? null,
+        iat_generated_bank_name: p.iat_generated_bank_name ?? null,
+
+        // --- who / when / approval ---
+        created_by: p.created_by ?? null,
+        generated_by: p.generated_by ?? null,
+        generated_by_user_id: p.generated_by_user_id ?? null,
+        generated_at: p.generated_at ?? p.created_at ?? null,
+        created_at: p.created_at ?? null,
+        updated_at: p.updated_at ?? null,
+        principal_approval_required: p.principal_approval_required ?? false,
+        principal_approval_status: p.principal_approval_status ?? null,
+        principal_request_id: p.principal_request_id ?? null,
+        approved_by: p.approved_by ?? null,
+        approved_at: p.approved_at ?? null,
+
+        question_count: selections.length,
+        questions: selections.map((q: any) => ({
+          question_id: q.question_id ?? null,
+          iat_question_id: q.iat_question_id ?? null,
+          question_bank_type: q.question_bank_type ?? 'original',
+          question_bank_id: q.question_bank_id ?? null,
+          question_number: q.question_number ?? null,
+          unit: q.unit ?? null,
+          part: q.part ?? null,
+          marks: q.marks ?? null,
+          btl: q.btl ?? null,
+          co: q.co ?? null,
+          pi: q.pi ?? null,
+          question_text: q.question_text ?? null,
+          order_index: q.order_index ?? 0
+        }))
+      };
+    });
+
+    return res.json({
+      papers: payload,
+      count: payload.length,
+      databaseConfigured: true,
+      questionMappingsAvailable
+    });
+  } catch (err: any) {
+    console.error('[paper-sets] list generated papers error:', err?.message);
+    return res.status(500).json({ error: err?.message || 'Failed to load generated papers.' });
+  }
+});
+
+// ====================================================================
 // GET /api/paper-sets/config — exposes the limit table to the frontend
 // ====================================================================
 router.get('/paper-sets/config', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
@@ -1174,4 +1408,71 @@ async function generateRequestNumber(client: any): Promise<string> {
     .select('*', { count: 'exact', head: true });
   const seq = ((count ?? 0) + 1).toString().padStart(3, '0');
   return `APR-${year}-${seq}`;
+}
+
+/** De-duplicates a list of ids while dropping empty entries. */
+function unique(values: any[]): string[] {
+  return Array.from(new Set(values.filter((v) => typeof v === 'string' && v.length > 0))) as string[];
+}
+
+/** PostgREST "relation does not exist" — i.e. migration 016 is not applied yet. */
+function isMissingRelation(error: { code?: string; message?: string }): boolean {
+  if (error.code === '42P01' || error.code === 'PGRST205') return true;
+  return /could not find the table|does not exist/i.test(error.message || '');
+}
+
+/**
+ * Normalises the wizard's selected questions into rows for
+ * `generated_paper_questions`.
+ *
+ * Only the source question's ID is stored — the text is captured alongside it
+ * for rendering, but the paper always points back at the real question row. A
+ * reduced (scrutinized) selection references `iat_generated_question_id`, an
+ * original selection references `question_id`, and the two are never mixed in
+ * the same paper.
+ */
+function buildPaperQuestionRows(params: {
+  paperId: string;
+  paperCode: string;
+  bankSource: 'ORIGINAL' | 'IAT_GENERATED';
+  questionBankId: string | null;
+  questions: any[];
+}): Array<Record<string, any>> {
+  const { paperId, paperCode, bankSource, questionBankId, questions } = params;
+  const isReduced = bankSource === 'IAT_GENERATED';
+  const seen = new Set<string>();
+  const rows: Array<Record<string, any>> = [];
+
+  questions.forEach((q: any, index: number) => {
+    const sourceId = typeof q === 'string' ? q : (q?.questionId || q?.question_id || q?.id);
+    if (typeof sourceId !== 'string' || !sourceId) return;
+
+    // A paper cannot list the same source question twice.
+    const dedupeKey = `${isReduced ? 'iat' : 'orig'}:${sourceId}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+
+    const text = typeof q === 'object' ? (q.questionText || q.question_text || null) : null;
+    const unit = typeof q === 'object' && q.unit != null ? Number(q.unit) : null;
+
+    rows.push({
+      paper_id: paperId,
+      paper_code: paperCode,
+      question_id: isReduced ? null : sourceId,
+      iat_question_id: isReduced ? sourceId : null,
+      question_bank_type: isReduced ? 'reduced' : 'original',
+      question_bank_id: questionBankId,
+      question_number: (typeof q === 'object' && (q.questionNumber || q.question_number)) || String(index + 1),
+      unit: Number.isFinite(unit) ? unit : null,
+      part: (typeof q === 'object' && (q.part || q.questionPart)) || null,
+      marks: typeof q === 'object' && q.marks != null ? Number(q.marks) : null,
+      btl: (typeof q === 'object' && (q.btl || q.bloomsLevel || q.btl_raw)) || null,
+      co: (typeof q === 'object' && q.co) || null,
+      pi: (typeof q === 'object' && q.pi) || null,
+      question_text: text,
+      order_index: index
+    });
+  });
+
+  return rows;
 }

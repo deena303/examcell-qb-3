@@ -400,6 +400,13 @@ export interface QuestionBankRow extends Record<string, any> {
 export async function getQuestionBanks(filters?: {
   academicYear?: string;
   department?: string;
+  /**
+   * Explicit department allow-list, used by the COMMON flow. A common paper
+   * spans several departments, so the bank must be resolved inside that exact
+   * set. Without this a code-only query could return a bank belonging to a
+   * department that is not part of the common paper.
+   */
+  departments?: string[];
   subjectCode?: string;
 }): Promise<QuestionBankRow[]> {
   if (!isSupabaseConfigured()) return [];
@@ -419,6 +426,10 @@ export async function getQuestionBanks(filters?: {
       }
       if (filters?.department) {
         query = query.eq('department', filters.department);
+      } else if (filters?.departments && filters.departments.length > 0) {
+        // COMMON scope: restrict to the chosen departments instead of leaving
+        // the department unconstrained.
+        query = query.in('department', filters.departments);
       }
       return query;
     };

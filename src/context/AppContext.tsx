@@ -56,6 +56,8 @@ interface AppContextType {
   logout: () => void;
   isSuperAdminPortal: boolean; // kept for backward compat — derived from userRole
   isPrincipalPortal: boolean;  // NEW — derived from userRole === 'PRINCIPAL'
+  mustChangePassword: boolean; // true when a newly-created user must set a new password
+  setMustChangePassword: (v: boolean) => void;
   navigateToPortal: (portal: 'examcell' | 'superadmin') => void; // kept for backward compat
 
   // ---- Navigation ----
@@ -92,6 +94,26 @@ interface AppContextType {
   iatGeneratorPrefill: IatGeneratorPrefill | null;
   setIatGeneratorPrefill: (prefill: IatGeneratorPrefill | null) => void;
 
+  // ---- Selected academic year: the single source of truth ----
+  /**
+   * The academic year currently selected for the active workflow.
+   *
+   * Every screen that scopes data by academic year (Generate Paper, Question
+   * Bank, the IAT generator, Generated Banks, the header) reads and writes THIS
+   * value. Nothing derives a year of its own, and no year is hardcoded, so the
+   * header can never disagree with the workflow.
+   *
+   * Empty means "not selected yet" — screens must not silently fall back to a
+   * different year.
+   */
+  selectedAcademicYear: string;
+  setSelectedAcademicYear: (yearLabel: string) => void;
+  /**
+   * Resets the selected academic year and every selection derived from it.
+   * Called on login/logout so no year survives a session change.
+   */
+  resetAcademicYearSelection: () => void;
+
   // ---- Subjects (local state — kept for paper gen compat) ----
   subjects: Subject[];
   addSubject: (subject: Omit<Subject, 'id' | 'totalQuestions'>) => void;
@@ -126,6 +148,8 @@ interface AppContextType {
   /** Set by "View / Print" on the Generated Papers page so the wizard opens the preview (Spec §17) */
   paperToReviewId: string | null;
   setPaperToReviewId: (id: string | null) => void;
+  /** Rehydrates a paper loaded from the Supabase archive into the session. */
+  loadArchivedPaper: (paper: GeneratedPaper) => void;
   generatePaper: (params: {
     subjectCode: string;
     examType: ExamType;
@@ -208,6 +232,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // ============================================================
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [mustChangePassword, setMustChangePassword] = useState<boolean>(false);
 
   const userRole: AuthRole | null = authSession?.role ?? null;
   const isSuperAdminPortal = userRole === 'SUPER_ADMIN';
@@ -246,24 +271,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // ============================================================
   // Active-only lists for selector use
-  const activeAcademicYearsList = academicYearsList.filter(y => y.status === 'active');
-  const activeDepartmentsList = departmentsList.filter(d => (d.status === 'active' || d.is_active !== false) && !d.is_common);
+  const activeAcademicYearsList = useMemo(
+    () => academicYearsList.filter(y => y.status === 'active'),
+    [academicYearsList]
+  );
+  const activeDepartmentsList = useMemo(
+    () => departmentsList.filter(d => (d.status === 'active' || d.is_active !== false) && !d.is_common),
+    [departmentsList]
+  );
 
   // Derive legacy departments from activeDepartmentsList (fallback to INITIAL_DEPARTMENTS if loading/empty)
-  const departments = (activeDepartmentsList.length > 0 || departmentsList.length > 0)
-    ? activeDepartmentsList.map(d => ({
-        code: d.department_code,
-        name: d.department_name,
-        hod: d.hod_name || undefined
-      }))
-    : INITIAL_DEPARTMENTS;
+  const departments = useMemo(
+    () => (activeDepartmentsList.length > 0 || departmentsList.length > 0)
+      ? activeDepartmentsList.map(d => ({
+          code: d.department_code,
+          name: d.department_name,
+          hod: d.hod_name || undefined
+        }))
+      : INITIAL_DEPARTMENTS,
+    [activeDepartmentsList, departmentsList]
+  );
 
   // Selected department scope & common departments state
   const [selectedDeptScope, setSelectedDeptScope] = useState<DepartmentScope>('SPECIFIC');
   const [selectedCommonDepts, setSelectedCommonDepts] = useState<string[]>([]);
 
   // Legacy academicYears array (string[]) for backward compat — derived from DB
-  const academicYearsFromDb = academicYearsList.map(y => y.year_label) as string[];
+  const academicYearsFromDb = useMemo(
+    () => academicYearsList.map(y => y.year_label) as string[],
+    [academicYearsList]
+  );
 
   // ============================================================
   // Legacy user state (for paper generation compat)
@@ -389,13 +426,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.PAPERS);
       const parsed = saved ? JSON.parse(saved) : null;
-      return Array.isArray(parsed) && parsed.length > 0 ? parsed : INITIAL_PAPERS;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        // Exclude mock papers
+        const withoutMock = parsed.filter((p: any) => !p.id?.startsWith('paper-10'));
+        return withoutMock;
+      }
+      return [];
     } catch {
-      return INITIAL_PAPERS;
+      return [];
     }
   });
 
-  const [activePaper, setActivePaper] = useState<GeneratedPaper | null>(() => INITIAL_PAPERS[0] || null);
+  const [activePaper, setActivePaper] = useState<GeneratedPaper | null>(null);
   const [paperToReviewId, setPaperToReviewId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -456,6 +498,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     clearPersistedAuthState();
     setAuthSession(null);
     setIsAuthenticated(false);
+    setMustChangePassword(false);
     setActiveTab('dashboard');
     setPreviousTab('dashboard');
     try {
@@ -469,6 +512,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       setAuthSession(session);
       setIsAuthenticated(true);
+
+      // If this is a first-login forced-change user, route to change-password
+      if (result.mustChangePassword) {
+        setMustChangePassword(true);
+        setActiveTab('change-password');
+        showToast(`Welcome, ${result.user.name}. Please change your temporary password to continue.`);
+        return;
+      }
 
       // Role-based routing. The portal is derived from `userRole` alone, so a
       // SUPER_ADMIN is always identified as Super Admin and always lands in the
@@ -504,10 +555,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setIsAuthenticated(false);
     setActiveTab('dashboard');
     setPreviousTab('dashboard');
+    setSelectedAcademicYearState('');
+    setIatGeneratorPrefill(null);
     setActivePaper(null);
     setPaperToReviewId(null);
     setToastMessage(null);
     setIatGeneratorPrefill(null);
+    // No academic year may survive a session change.
+    setSelectedAcademicYearState('');
     showToast('Logged out successfully.');
   };
 
@@ -518,6 +573,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // IAT Question Bank Generator handoff
   // ============================================================
   const [iatGeneratorPrefill, setIatGeneratorPrefill] = useState<IatGeneratorPrefill | null>(null);
+
+  // ============================================================
+  // Selected academic year — single source of truth
+  // ============================================================
+  const [selectedAcademicYear, setSelectedAcademicYearState] = useState<string>('');
+
+  /**
+   * Sets the workflow's academic year.
+   *
+   * `setSelectedAcademicYear` in the context already resets everything derived
+   * from the previous year (see the cascade in the wizard), so this is a plain
+   * setter; the derived state is cleared by whichever screen changed the year.
+   */
+  const setSelectedAcademicYear = useCallback((yearLabel: string) => {
+    setSelectedAcademicYearState((prev) => (prev === yearLabel ? prev : yearLabel));
+  }, []);
+
+  const resetAcademicYearSelection = useCallback(() => {
+    setSelectedAcademicYearState('');
+  }, []);
 
   // ============================================================
   // Subjects Management (local state)
@@ -701,6 +776,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     scope, commonDepartments, departmentIds, setLetter: setLetterOverride,
     setDisplayName: setDisplayNameOverride, principalRequestId, maxMarks: maxMarksOverride,
     availableQuestionCount,
+    subjectId, academicYearId, departmentId,
+    originalQuestionBankId, originalQuestionPool,
     questionPool, questionBankSource, iatGeneratedBankId, iatGeneratedBankName
   }: {
     subjectCode: string; examType: ExamType; examDate?: string; semester?: string;
@@ -708,18 +785,75 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     scope?: DepartmentScope; commonDepartments?: string[]; departmentIds?: string[];
     setLetter?: string; setDisplayName?: string; principalRequestId?: string | null; maxMarks?: number;
     availableQuestionCount?: number;
+    /**
+     * The database `subjects.id` of the selected subject. When present the
+     * subject record is resolved by id, so a subject code shared by several
+     * years/departments can never resolve to the wrong record.
+     */
+    subjectId?: string | null;
+    academicYearId?: string | null;
+    departmentId?: string | null;
+    /**
+     * The ORIGINAL question bank that matches the selected identity, and its
+     * questions loaded from the database. This is what an End Semester / plain
+     * ORIGINAL paper is built from — the questions are never taken from the
+     * browser cache and never selected by subject code alone.
+     */
+    originalQuestionBankId?: string | null;
+    originalQuestionPool?: Question[];
     questionPool?: Question[];
     questionBankSource?: QuestionBankSource;
     iatGeneratedBankId?: string | null;
     iatGeneratedBankName?: string | null;
   }): GeneratedPaper => {
-    let subject = subjects.find(s => s.code === subjectCode);
+    // ---- Resolve the subject from its DATABASE identity, never by code alone ----
+    const dbRecord = subjectId
+      ? subjectsList.find((s) => s.id === subjectId)
+      : undefined;
+
+    const resolvedCode = dbRecord?.subject_code || subjectCode;
+    const resolvedName = dbRecord?.subject_name || '';
+    const resolvedYearId = academicYearId ?? dbRecord?.academic_year_id ?? null;
+    const resolvedDeptId = departmentId ?? dbRecord?.department_id ?? null;
+
+    // Prefer the exact DB subject; fall back to the local pool only when the
+    // caller genuinely has no DB id (legacy callers).
+    let subject = dbRecord
+      ? {
+          id: dbRecord.id,
+          code: dbRecord.subject_code,
+          name: dbRecord.subject_name,
+          department:
+            dbRecord.departments?.department_code ||
+            departmentsList.find((d) => d.id === dbRecord.department_id)?.department_code ||
+            department ||
+            '',
+          semester: dbRecord.semester || '',
+          regulation: dbRecord.regulation || 'Regulation 2024',
+          totalQuestions: 0,
+          status: 'Active' as const,
+          academicYear:
+            dbRecord.academic_years?.year_label ||
+            academicYearsList.find((y) => y.id === dbRecord.academic_year_id)?.year_label ||
+            academicYear ||
+            '',
+          units: []
+        }
+      : subjects.find((s) => s.code === resolvedCode);
     if (!subject) {
       if (department) {
-        subject = subjects.find(s => s.department === department) || subjects[0];
+        subject = subjects.find((s) => s.department === department) || subjects[0];
       } else {
         subject = subjects[0];
       }
+    }
+    if (!subject) {
+      // No subject could be resolved at all — fail loudly rather than invent one.
+      throw new Error('No subject record could be resolved for the selected academic year and department.');
+    }
+    // Keep the code/name aligned with the DB record we actually selected.
+    if (dbRecord) {
+      subject = { ...subject, code: dbRecord.subject_code, name: dbRecord.subject_name };
     }
 
     const isIA1 = examType === 'Internal Assessment I';
@@ -740,9 +874,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const effectiveIatBankId = useIatBank ? (iatGeneratedBankId ?? null) : null;
     const effectiveIatBankName = useIatBank ? (iatGeneratedBankName ?? null) : null;
 
+    /**
+     * The ORIGINAL bank for the selected identity. When the caller supplied it,
+     * the pool is exactly that bank's questions — resolved by question bank id,
+     * never by subject code, so no other year/department/bank can contribute.
+     */
+    const useOriginalBank =
+      !useIatBank &&
+      Array.isArray(originalQuestionPool) &&
+      originalQuestionPool.length > 0 &&
+      Boolean(originalQuestionBankId);
+
     let poolForSubject: Question[] = useIatBank
       ? (questionPool as Question[]).slice()
-      : currentQuestions.filter(q => q.subjectCode === subject!.code);
+      : useOriginalBank
+        ? (originalQuestionPool as Question[]).slice()
+        : currentQuestions.filter((q) => q.subjectCode === subject!.code);
 
     if (useIatBank && effectiveIatBankId) {
       iatBankPoolsRef.current.set(effectiveIatBankId, poolForSubject.slice());
@@ -782,7 +929,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // silently padding the paper with invented questions.
     // A selected Generated IAT Question Bank is NEVER padded — its question
     // set is exactly what the user asked for (Spec §2, §7).
-    if (validationPassed === false && dbAvailable === null && !useIatBank) {
+    // Likewise, when the ORIGINAL bank for the selected identity was loaded
+    // from the database, its questions are authoritative and are never padded.
+    if (validationPassed === false && dbAvailable === null && !useIatBank && !useOriginalBank) {
       const synthesized = synthesizeSubjectQuestions(subject);
       const existingTexts = new Set(poolForSubject.map(q => q.questionText.trim().toLowerCase()));
       const toAdd = synthesized.filter(q => !existingTexts.has(q.questionText.trim().toLowerCase()));
@@ -994,7 +1143,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // from. End Semester is always 'ORIGINAL'.
       questionBankSource: effectiveBankSource,
       iatGeneratedBankId: effectiveIatBankId,
-      iatGeneratedBankName: effectiveIatBankName
+      iatGeneratedBankName: effectiveIatBankName,
+      // The exact database identity this paper belongs to, so every later
+      // screen (preview, PDF, DOCX, records) can prove which
+      // year / department / subject / question bank produced it.
+      subjectId: subject.id || null,
+      academicYearId: resolvedYearId,
+      departmentId: resolvedDeptId,
+      questionBankId: useIatBank ? effectiveIatBankId : (originalQuestionBankId ?? null)
     };
 
     setGeneratedPapers(prev => [newPaper, ...prev]);
@@ -1152,6 +1308,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (activePaper && activePaper.id === paperId) setActivePaper(null);
   };
 
+  /**
+   * Puts a paper read back from the database archive into the session so the
+   * preview / print / export screens can render it.
+   *
+   * The Generated Question Papers page loads its rows from Supabase rather than
+   * from browser state, so opening one of them has to rehydrate the paper here.
+   * The archived copy is upserted (never duplicated) and becomes the active
+   * paper, which is what the wizard's review step looks for.
+   */
+  const loadArchivedPaper = (paper: GeneratedPaper) => {
+    setGeneratedPapers(prev => {
+      const exists = prev.some(p => p.id === paper.id);
+      return exists ? prev.map(p => (p.id === paper.id ? { ...paper, ...p } : p)) : [paper, ...prev];
+    });
+    setActivePaper(paper);
+  };
+
   // ============================================================
   // Legacy Users Management
   // ============================================================
@@ -1192,6 +1365,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         logout,
         isSuperAdminPortal,
         isPrincipalPortal,
+        mustChangePassword,
+        setMustChangePassword,
         navigateToPortal,
         activeTab,
         setActiveTab: setActiveTabWithHistory,
@@ -1212,6 +1387,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         authToken: authSession?.token ?? null,
         iatGeneratorPrefill,
         setIatGeneratorPrefill,
+        selectedAcademicYear,
+        setSelectedAcademicYear,
+        resetAcademicYearSelection,
         subjects: effectiveSubjects,
         addSubject,
         updateSubject,
@@ -1243,6 +1421,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         replaceQuestionInPaper,
         regeneratePaper,
         removePaper,
+        loadArchivedPaper,
         updatePaperStatus,
         deletePaper,
         getNextSetLetter,

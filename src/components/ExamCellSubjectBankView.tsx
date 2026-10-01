@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   BookOpen,
   Search,
@@ -21,11 +21,32 @@ export const ExamCellSubjectBankView: React.FC = () => {
     academicYearsList,
     questions,
     masterDataLoading,
-    refreshMasterData
+    refreshMasterData,
+    selectedAcademicYear: sharedAcademicYearLabel,
+    setSelectedAcademicYear: setSharedAcademicYear
   } = useApp();
 
   const [filterYearId, setFilterYearId] = useState<string>('');
   const [filterDeptId, setFilterDeptId] = useState<string>('');
+
+  // ---- Academic year is shared application state ----
+  // The shared label is resolved to the exact `academic_years` row here, so
+  // this registry shows the same year as the rest of the workflow.
+  useEffect(() => {
+    if (!sharedAcademicYearLabel) return;
+    const match = academicYearsList.find((y) => y.year_label === sharedAcademicYearLabel);
+    if (!match || match.id === filterYearId) return;
+    setFilterYearId(match.id);
+    setFilterDeptId('');
+  }, [sharedAcademicYearLabel, academicYearsList, filterYearId]);
+
+  useEffect(() => {
+    if (!filterYearId) return;
+    const label = academicYearsList.find((y) => y.id === filterYearId)?.year_label || '';
+    if (!label || label === sharedAcademicYearLabel) return;
+    setSharedAcademicYear(label);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterYearId, academicYearsList]);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -164,6 +185,9 @@ export const ExamCellSubjectBankView: React.FC = () => {
             <button
               onClick={() => {
                 setFilterYearId('');
+                // Clear the shared year too, otherwise the sync effect would
+                // immediately re-apply it.
+                setSharedAcademicYear('');
                 setFilterDeptId('');
                 setSearchQuery('');
               }}

@@ -54,7 +54,7 @@ VALUES
     'examcell@msajce-edu.in',
     '$2b$10$K7L/8LwR3Y5mHnXqVzP0/.JxM2S9wQpOiFlBa1mC3dUvXzKhY4Emu',
     'EXAM_CELL',
-    'Dr. R. Vignesh Kumar',
+    'Msajce',
     'active'
   ),
   (

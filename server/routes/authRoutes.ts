@@ -87,6 +87,7 @@ router.post('/auth/login', async (req: Request, res: Response) => {
     return res.json({
       success: true,
       token: result.token,
+      mustChangePassword: result.mustChangePassword || false,
       user: {
         id: result.userId,
         email: result.email,

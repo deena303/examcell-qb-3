@@ -116,14 +116,22 @@ router.get('/question-banks/count', requireAuth, async (_req: AuthenticatedReque
  */
 router.get('/question-banks', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { academicYear, department, subjectCode } = req.query as {
+    const { academicYear, department, subjectCode, departments } = req.query as {
       academicYear?: string;
       department?: string;
+      departments?: string;
       subjectCode?: string;
     };
+    // COMMON scope sends a comma-separated department allow-list so the bank
+    // is resolved inside exactly those departments.
+    const departmentList = (departments || '')
+      .split(',')
+      .map((d) => d.trim())
+      .filter(Boolean);
     const banks = await getQuestionBanks({
       academicYear: academicYear && academicYear !== 'all' ? academicYear : undefined,
       department: department && department !== 'all' ? department : undefined,
+      departments: departmentList.length > 0 ? departmentList : undefined,
       subjectCode: subjectCode && subjectCode !== 'all' ? subjectCode : undefined
     });
     res.json({ success: true, questionBanks: banks });

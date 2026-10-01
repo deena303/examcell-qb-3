@@ -36,6 +36,7 @@ import {
   markIatBankUsedForPaper,
   IatGeneratedBank
 } from '../services/iatQuestionBankApi';
+import { fetchQuestionBanks, fetchQuestionsForBank, mapDbQuestion } from '../services/questionBankApi';
 
 const SET_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
 
@@ -83,13 +84,11 @@ function iatPoolToQuestions(
 
 export const GeneratePaperWizard: React.FC = () => {
   const {
-    subjects,
     dbSubjects,
     activeDepartmentsList,
     academicYearsList,
     activeAcademicYearsList,
     departments,
-    academicYears,
     generatePaper,
     activePaper,
     setActivePaper,
@@ -105,7 +104,9 @@ export const GeneratePaperWizard: React.FC = () => {
     showToast,
     removePaper,
     paperToReviewId,
-    setPaperToReviewId
+    setPaperToReviewId,
+    setSelectedAcademicYear: setWorkflowAcademicYear,
+    resetAcademicYearSelection
   } = useApp();
 
   // Spec §2 — entering "Generate Paper" ALWAYS starts at STEP 1 (Academic Year).
@@ -114,11 +115,19 @@ export const GeneratePaperWizard: React.FC = () => {
 
   // Form selections (order: Year -> Dept -> Subject -> ExamType)
   // Spec §2 — the academic year is NOT auto-selected; the Exam Cell must choose.
+  // It is stored in the application context so the header and every other
+  // year-scoped screen show the SAME year (no stale/hardcoded value).
   const [selectedAcademicYear, setSelectedAcademicYear] = useState<string>('');
   const [selectedDeptScope, setSelectedDeptScope] = useState<DepartmentScope>(ctxDeptScope || 'SPECIFIC');
   const [selectedDept, setSelectedDept] = useState<Department | ''>('');
   const [selectedCommonDepts, setSelectedCommonDepts] = useState<string[]>(ctxCommonDepts || []);
-  const [selectedSubject, setSelectedSubject] = useState<string>('');
+  /**
+   * The selected subject is tracked by its DATABASE ID (the `subjects.id`
+   * primary key). A subject code is NOT an identity: the same code can exist
+   * under different academic years and different departments, so selecting by
+   * code would silently resolve to the wrong record.
+   */
+  const [selectedSubjectId, setSelectedSubjectId] = useState<string>('');
   const [selectedExamType, setSelectedExamType] = useState<ExamType>('Internal Assessment I');
 
   // ------------------------------------------------------------------
@@ -131,6 +140,11 @@ export const GeneratePaperWizard: React.FC = () => {
   const [iatBanksLoading, setIatBanksLoading] = useState(false);
   const [iatBanksError, setIatBanksError] = useState<string | null>(null);
   const [selectedIatBankId, setSelectedIatBankId] = useState<string>('');
+  /**
+   * Set when the archive write failed. The paper stays in the UI (the user must
+   * not lose their work) but it is NOT presented as saved.
+   */
+  const [archiveSaveError, setArchiveSaveError] = useState<string | null>(null);
   const [iatPool, setIatPool] = useState<Question[] | null>(null);
   const [iatPoolLoading, setIatPoolLoading] = useState(false);
   const [iatPoolError, setIatPoolError] = useState<string | null>(null);
@@ -179,97 +193,127 @@ export const GeneratePaperWizard: React.FC = () => {
     'Assembling MSAJCE autonomous paper preview'
   ];
 
-  // Map DB subjects to Subject shape.
-  // `totalQuestions` is NEVER hardcoded — it comes from the database via
-  // `questionCounts` below (Spec §9, §18). Subjects from Super Admin's
-  // Master Subjects table are the single source of the list.
-  const dbSubjectsMapped = React.useMemo(() => {
-    if (!dbSubjects || dbSubjects.length === 0) return [];
-    return dbSubjects.map(s => {
-      const deptCode = s.departments?.department_code || activeDepartmentsList.find(d => d.id === s.department_id)?.department_code || '';
-      const yearLabel = s.academic_years?.year_label || academicYearsList.find(y => y.id === s.academic_year_id)?.year_label || '';
-      return {
-        id: s.id,
-        code: s.subject_code,
-        name: s.subject_name,
-        department: deptCode as any,
-        semester: s.semester ? parseInt(s.semester) || 1 : 1,
-        regulation: s.regulation || 'Regulation 2024',
-        totalQuestions: questionCounts[s.subject_code] ?? 0,
-        status: (s.status === 'active' ? 'Active' : 'Archived') as 'Active' | 'Archived',
-        units: [],
-        academicYear: yearLabel
-      };
-    });
-  }, [dbSubjects, activeDepartmentsList, academicYearsList, questionCounts]);
+  // ------------------------------------------------------------------
+  // Database IDs for the selected combination
+  // The academic year is resolved from the selected LABEL to its id; the
+  // department likewise. Both come from the database — never hardcoded.
+  // ------------------------------------------------------------------
+  const selectedAcademicYearId = React.useMemo(
+    () => academicYearsList.find((y) => y.year_label === selectedAcademicYear)?.id || null,
+    [academicYearsList, selectedAcademicYear]
+  );
 
-  // Combined pool preferring DB subjects as the single source of truth when available.
-  const allSubjectsPool = React.useMemo(() => {
-    if (dbSubjectsMapped.length > 0) {
-      return dbSubjectsMapped;
-    }
-    return subjects;
-  }, [dbSubjectsMapped, subjects]);
+  const selectedDepartmentId = React.useMemo(() => {
+    if (selectedDeptScope === 'COMMON') return null;
+    return activeDepartmentsList.find((d) => d.department_code === selectedDept)?.id || null;
+  }, [selectedDeptScope, selectedDept, activeDepartmentsList]);
 
-  // Subject filtering: always scoped by the selected Academic Year
+  /**
+   * Subjects available for the CURRENT selection.
+   *
+   * Built ONLY from the database `subjects` table, and matched on the full
+   * identity: academic_year_id + department_id + active status.
+   *
+   * There is deliberately NO fallback to the legacy local `subjects` array —
+   * that array is browser-cached placeholder data and would let subjects from
+   * another year/department leak into the list.
+   */
   const deptSubjects = React.useMemo(() => {
-    if (!selectedAcademicYear) return [];
-    if (selectedDeptScope === 'COMMON') {
-      const filtered = allSubjectsPool.filter(s => {
-        const matchesDept = selectedCommonDepts.includes(s.department);
-        const matchesYear = (s as any).academicYear ? (s as any).academicYear === selectedAcademicYear : true;
-        return matchesDept && matchesYear;
-      });
-      const seen = new Set<string>();
-      return filtered.filter(s => {
-        if (seen.has(s.code)) return false;
-        seen.add(s.code);
-        return true;
-      });
-    }
-    if (!selectedDept) return [];
-    return allSubjectsPool.filter(s => {
-      const matchesDept = s.department === selectedDept;
-      const matchesYear = (s as any).academicYear ? (s as any).academicYear === selectedAcademicYear : true;
-      return matchesDept && matchesYear;
-    });
-  }, [selectedDeptScope, selectedCommonDepts, selectedDept, selectedAcademicYear, allSubjectsPool]);
+    if (!selectedAcademicYearId) return [];
 
-  // Auto-sync selected subject if current selection is not in filtered list
-  useEffect(() => {
-    if (deptSubjects.length > 0 && !deptSubjects.some(s => s.code === selectedSubject)) {
-      setSelectedSubject(deptSubjects[0].code);
-      setSelectedSubjectCode(deptSubjects[0].code);
-    }
-    if (deptSubjects.length === 0) {
-      setSelectedSubject('');
-    }
-  }, [deptSubjects, selectedSubject, setSelectedSubjectCode]);
-
-  const currentSubjectObj = deptSubjects.find(s => s.code === selectedSubject) || allSubjectsPool.find(s => s.code === selectedSubject);
-
-  // ------------------------------------------------------------------
-  // Resolve database IDs for the selected combination
-  // ------------------------------------------------------------------
-  const dbIds = useMemo(() => {
-    const subjectRow = dbSubjects?.find(s => s.subject_code === selectedSubject);
-    // Prefer the subject row that matches the chosen department + year
-    const exact = dbSubjects?.find(s =>
-      s.subject_code === selectedSubject &&
-      s.academic_year_id === academicYearsList.find(y => y.year_label === selectedAcademicYear)?.id &&
-      (selectedDeptScope === 'COMMON'
-        ? true
-        : s.department_id === activeDepartmentsList.find(d => d.department_code === selectedDept)?.id)
+    const commonDeptIds = new Set(
+      (activeDepartmentsList.filter((d) => selectedCommonDepts.includes(d.department_code))).map((d) => d.id)
     );
-    const row = exact || subjectRow;
+
+    return (dbSubjects || [])
+      .filter((s) => {
+        if (s.status !== 'active') return false;                 // active only
+        if (s.academic_year_id !== selectedAcademicYearId) return false; // exact year
+        if (selectedDeptScope === 'COMMON') {
+          return commonDeptIds.has(s.department_id);             // any chosen common dept
+        }
+        return Boolean(selectedDepartmentId) && s.department_id === selectedDepartmentId;
+      })
+      .sort((a, b) => a.subject_code.localeCompare(b.subject_code));
+  }, [
+    dbSubjects,
+    selectedAcademicYearId,
+    selectedDepartmentId,
+    selectedDeptScope,
+    selectedCommonDepts,
+    activeDepartmentsList
+  ]);
+
+  /** The subject record for the selected id, verified against the current scope. */
+  const selectedSubjectRecord = React.useMemo(() => {
+    if (!selectedSubjectId) return null;
+    const row = (dbSubjects || []).find((s) => s.id === selectedSubjectId) || null;
+    if (!row) return null;
+    // Re-verify: the record must still belong to the selected year + department.
+    if (row.academic_year_id !== selectedAcademicYearId) return null;
+    if (selectedDeptScope === 'COMMON') {
+      const commonDeptIds = new Set(
+        activeDepartmentsList.filter((d) => selectedCommonDepts.includes(d.department_code)).map((d) => d.id)
+      );
+      if (!commonDeptIds.has(row.department_id)) return null;
+    } else if (!selectedDepartmentId || row.department_id !== selectedDepartmentId) {
+      return null;
+    }
+    if (row.status !== 'active') return null;
+    return row;
+  }, [
+    selectedSubjectId,
+    dbSubjects,
+    selectedAcademicYearId,
+    selectedDepartmentId,
+    selectedDeptScope,
+    selectedCommonDepts,
+    activeDepartmentsList
+  ]);
+
+  /** Subject code of the verified selection (kept for API calls that filter by code). */
+  const selectedSubject = selectedSubjectRecord?.subject_code || '';
+  const selectedSubjectName = selectedSubjectRecord?.subject_name || '';
+
+  /** Convenience view of the selection, used by the Step 3 cards. */
+  const currentSubjectObj = React.useMemo(() => {
+    if (!selectedSubjectRecord) return null;
+    const deptCode =
+      selectedSubjectRecord.departments?.department_code ||
+      activeDepartmentsList.find((d) => d.id === selectedSubjectRecord.department_id)?.department_code ||
+      '';
     return {
-      subjectId: row?.id || null,
-      academicYearId: academicYearsList.find(y => y.year_label === selectedAcademicYear)?.id || null,
-      departmentId: selectedDeptScope === 'COMMON'
-        ? null
-        : activeDepartmentsList.find(d => d.department_code === selectedDept)?.id || null
+      id: selectedSubjectRecord.id,
+      code: selectedSubjectRecord.subject_code,
+      name: selectedSubjectRecord.subject_name,
+      department: deptCode,
+      semester: selectedSubjectRecord.semester || '',
+      regulation: selectedSubjectRecord.regulation || '',
+      academicYear: academicYearsList.find((y) => y.id === selectedSubjectRecord.academic_year_id)?.year_label || '',
+      totalQuestions: questionCounts[selectedSubjectRecord.subject_code] ?? 0,
+      status: 'Active' as const,
+      units: []
     };
-  }, [dbSubjects, selectedSubject, selectedAcademicYear, academicYearsList, selectedDept, selectedDeptScope, activeDepartmentsList]);
+  }, [selectedSubjectRecord, activeDepartmentsList, academicYearsList, questionCounts]);
+
+  // ------------------------------------------------------------------
+  // Database IDs handed to every downstream API call.
+  // All three come from the verified selection — never from a code-only lookup.
+  // ------------------------------------------------------------------
+  const dbIds = useMemo(
+    () => ({
+      subjectId: selectedSubjectRecord?.id || null,
+      academicYearId: selectedAcademicYearId,
+      departmentId: selectedDepartmentId
+    }),
+    [selectedSubjectRecord, selectedAcademicYearId, selectedDepartmentId]
+  );
+
+  // Clear the subject whenever the year or the department scope changes, so a
+  // stale subject can never survive a change of year/department.
+  useEffect(() => {
+    setSelectedSubjectId((prev) => (prev && selectedSubjectRecord?.id === prev ? prev : ''));
+  }, [selectedSubjectRecord]);
 
   // ------------------------------------------------------------------
   // Spec §19 / §30 — End Semester NEVER offers the IAT reduced bank.
@@ -344,6 +388,98 @@ export const GeneratePaperWizard: React.FC = () => {
   const selectedIatBank = iatBanks.find(b => b.id === selectedIatBankId) || null;
   const iatSourceSelected = questionBankSource === 'IAT_GENERATED' && !!iatPool && !!selectedIatBank;
   const iatSourceBlocked = questionBankSource === 'IAT_GENERATED' && !iatSourceSelected;
+
+  // ------------------------------------------------------------------
+  // ORIGINAL question bank for the selected identity
+  //
+  // The bank is resolved with Academic Year + Department + Subject Code and
+  // its questions are read from the DATABASE. A paper is therefore never built
+  // from the browser cache and never from another year/department/bank that
+  // merely shares the same subject code.
+  // ------------------------------------------------------------------
+  const [originalBank, setOriginalBank] = useState<{ id: string; total: number } | null>(null);
+  const [originalPool, setOriginalPool] = useState<Question[]>([]);
+  const [originalPoolLoading, setOriginalPoolLoading] = useState(false);
+  const [originalPoolError, setOriginalPoolError] = useState<string | null>(null);
+
+  const originalScopeKey = `${dbIds.academicYearId || ''}|${dbIds.departmentId || ''}|${dbIds.subjectId || ''}|${selectedAcademicYear}|${selectedDept}|${selectedDeptScope}|${selectedCommonDepts.join(',')}`;
+
+  useEffect(() => {
+    if (!authSession?.token || !dbIds.academicYearId || !dbIds.subjectId || !selectedSubject) {
+      setOriginalBank(null);
+      setOriginalPool([]);
+      setOriginalPoolError(null);
+      return;
+    }
+    let cancelled = false;
+    setOriginalPoolLoading(true);
+    setOriginalPoolError(null);
+    setOriginalPool([]);
+
+    // 1) Which question banks belong to this exact identity?
+    //    COMMON passes the chosen department allow-list so the bank can never
+    //    resolve to a department outside the common paper.
+    fetchQuestionBanks(authSession.token, {
+      academicYear: selectedAcademicYear,
+      department: selectedDeptScope === 'COMMON' ? undefined : (selectedDept as string) || undefined,
+      departments: selectedDeptScope === 'COMMON' ? selectedCommonDepts : undefined,
+      subjectCode: selectedSubject
+    })
+      .then(async (banks) => {
+        if (cancelled) return;
+        if (!banks.length) {
+          setOriginalBank(null);
+          setOriginalPoolError(
+            selectedDeptScope === 'COMMON'
+              ? 'No question bank was found for the selected academic year and common departments for this subject.'
+              : 'No question bank was found for the selected academic year, department and subject.'
+          );
+          return;
+        }
+        // Prefer the approved bank; otherwise the most recent one.
+        const chosen =
+          banks.find((b) => String(b.status || '').toLowerCase() === 'approved') ||
+          banks[0];
+        // Defence in depth: reject a bank whose department is outside the
+        // selected scope. This is a client-side guard on top of the
+        // server-side filter, so a filter regression cannot silently mix
+        // departments.
+        if (
+          selectedDeptScope === 'COMMON' &&
+          selectedCommonDepts.length > 0 &&
+          chosen.department &&
+          !selectedCommonDepts.includes(String(chosen.department))
+        ) {
+          setOriginalBank(null);
+          setOriginalPool([]);
+          setOriginalPoolError(
+            'The matched question bank belongs to a department that is not part of this common paper. Please select the correct departments.'
+          );
+          return;
+        }
+        setOriginalBank({ id: chosen.id, total: chosen.total_questions });
+
+        // 2) Its questions, from the database.
+        const rows = await fetchQuestionsForBank(authSession.token, chosen.id);
+        if (cancelled) return;
+        const mapped = rows.map(mapDbQuestion);
+        // Defence in depth: only questions that really belong to this bank.
+        setOriginalPool(mapped.filter((q) => q.questionBankId === chosen.id));
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        setOriginalBank(null);
+        setOriginalPool([]);
+        setOriginalPoolError(err?.message || 'Unable to load the question bank for the selected subject.');
+      })
+      .finally(() => !cancelled && setOriginalPoolLoading(false));
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authSession?.token, originalScopeKey, selectedDeptScope]);
+
+  const originalBankReady = Boolean(originalBank) && originalPool.length > 0;
+  const originalBankBlocked = !originalPoolLoading && !originalBankReady;
 
   // ------------------------------------------------------------------
   // Real question counts (Spec §9–§15, §17)
@@ -484,38 +620,95 @@ export const GeneratePaperWizard: React.FC = () => {
     return SET_LETTERS.find(l => !existing.has(l)) || null;
   })();
 
+  /**
+   * STEP 1 — select the academic year.
+   * Changing the year invalidates every selection derived from it, so the
+   * department and the subject are cleared and the workflow returns to STEP 2.
+   * The year is also written to the shared context so the header and the other
+   * year-scoped screens show the same value.
+   */
+  /**
+   * Clears every piece of state that was derived from a previous
+   * year / department / subject selection, so nothing stale can be carried into
+   * the next generation attempt.
+   */
+  const resetFromPaperWizard = React.useCallback(() => {
+    setSelectedIatBankId('');
+    setIatPool(null);
+    setIatBanks([]);
+    setIatBanksError(null);
+    setIatPoolError(null);
+    setSetStatus(null);
+    setStatusError(null);
+    setGenerationBlock(null);
+    setQuestionCounts({});
+    setQuestionCountsLoaded(false);
+    setQuestionCountsError(null);
+    setCurrentStep(1);
+  }, []);
+
+  /**
+   * STEP 1 — select the academic year.
+   * Changing the year invalidates every selection derived from it, so the
+   * department and the subject are cleared and the workflow returns to STEP 2.
+   * The year is also written to the shared context so the header and the other
+   * year-scoped screens show the same value.
+   */
+  const handleAcademicYearSelect = (yr: string) => {
+    if (yr === selectedAcademicYear) return;
+    setSelectedAcademicYear(yr);
+    setWorkflowAcademicYear(yr);
+    setSelectedDeptScope('SPECIFIC');
+    setSelectedDept('');
+    setSelectedCommonDepts([]);
+    setSelectedSubjectId('');
+    setSelectedSubjectCode('');
+    resetFromPaperWizard();
+    setCurrentStep(2);
+  };
+
   const handleDeptSelect = (dept: Department) => {
     setSelectedDeptScope('SPECIFIC');
     setSelectedDept(dept);
     setSelectedCommonDepts([]);
-    const sub = allSubjectsPool.find(s => s.department === dept && ((s as any).academicYear ? (s as any).academicYear === selectedAcademicYear : true));
-    if (sub) {
-      setSelectedSubject(sub.code);
-      setSelectedSubjectCode(sub.code);
-    }
+    // The subject always belongs to one year + one department: changing the
+    // department invalidates it.
+    setSelectedSubjectId('');
+    setSelectedSubjectCode('');
+    setSelectedIatBankId('');
+    setIatPool(null);
+    setSetStatus(null);
   };
 
   const handleCommonSelect = () => {
     setSelectedDeptScope('COMMON');
+    setSelectedDept('');
+    setSelectedSubjectId('');
+    setSelectedSubjectCode('');
+    setSelectedIatBankId('');
+    setIatPool(null);
+    setSetStatus(null);
   };
 
   const handleToggleCommonDept = (code: string) => {
-    setSelectedCommonDepts(prev => {
-      const next = prev.includes(code) ? prev.filter(c => c !== code) : [...prev, code];
-      if (next.length > 0) {
-        const sub = allSubjectsPool.find(s => next.includes(s.department) && ((s as any).academicYear ? (s as any).academicYear === selectedAcademicYear : true));
-        if (sub) {
-          setSelectedSubject(sub.code);
-          setSelectedSubjectCode(sub.code);
-        }
-      }
+    setSelectedCommonDepts((prev) => {
+      const next = prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code];
+      // A different department set means a different subject set.
+      setSelectedSubjectId('');
+      setSelectedSubjectCode('');
+      setSelectedIatBankId('');
+      setIatPool(null);
       return next;
     });
   };
 
-  const handleSubjectSelect = (code: string) => {
-    setSelectedSubject(code);
-    setSelectedSubjectCode(code);
+  /** Selects a subject by its database id — the true identity. */
+  const handleSubjectSelect = (subjectId: string) => {
+    setSelectedSubjectId(subjectId);
+    const row = (dbSubjects || []).find((s) => s.id === subjectId);
+    if (row?.subject_code) setSelectedSubjectCode(row.subject_code);
+    setSelectedIatBankId('');
+    setIatPool(null);
   };
 
   // ------------------------------------------------------------------
@@ -558,12 +751,36 @@ export const GeneratePaperWizard: React.FC = () => {
   // ------------------------------------------------------------------
   // Generation (Spec §4, §14, §15)
   // ------------------------------------------------------------------
+  // The original bank is only a prerequisite when the ORIGINAL source is
+  // actually selected. When an IAT reduced bank is chosen, requiring the
+  // original bank too would block generation for a valid IAT flow.
+  const originalSourceBlocked = questionBankSource === 'ORIGINAL' && originalBankBlocked;
+
+  const generationBlocked =
+    iatSourceBlocked ||
+    originalSourceBlocked ||
+    !dbIds.subjectId ||
+    !dbIds.academicYearId;
+
   const handleStartGeneration = () => {
     if (!canGenerate || !nextSetLetter || !currentSubjectObj) return;
     // Spec §19 / §30 — a reduced IAT bank must be fully loaded before it can
     // be used, and never for End Semester.
     if (iatSourceBlocked) return;
     if (questionBankSource === 'IAT_GENERATED' && !isIatExam(selectedExamType)) return;
+    // A complete subject identity is mandatory: no year / department / subject
+    // means no paper, and no question bank for that identity means no paper.
+    if (!dbIds.subjectId || !dbIds.academicYearId) return;
+    // Every question must come from a real question bank. When the ORIGINAL
+    // source is used, that bank must be loaded first — we never fall back to
+    // the browser cache and never invent questions.
+    if (questionBankSource === 'ORIGINAL' && !originalBankReady) {
+      showToast(
+        originalPoolError ||
+          'The question bank for the selected academic year, department and subject is not available yet.'
+      );
+      return;
+    }
     setIsGenerating(true);
     setGenerationStepsDone(0);
 
@@ -581,6 +798,14 @@ export const GeneratePaperWizard: React.FC = () => {
           commonDepartments: selectedDeptScope === 'COMMON' ? selectedCommonDepts : undefined,
           subjectCode: selectedSubject,
           academicYear: selectedAcademicYear,
+          // The exact database identity — year + department + subject.
+          subjectId: dbIds.subjectId,
+          academicYearId: dbIds.academicYearId,
+          departmentId: dbIds.departmentId,
+          // The original question bank for that identity, and its questions
+          // read from the database.
+          originalQuestionBankId: originalBank?.id ?? null,
+          originalQuestionPool: originalBankReady ? originalPool : undefined,
           examType: selectedExamType,
           examDate: new Date().toISOString().split('T')[0],
           semester: String((currentSubjectObj as any).semester ?? ''),
@@ -643,8 +868,28 @@ export const GeneratePaperWizard: React.FC = () => {
           return;
         }
 
-        // 3) Persist the generated_papers record (Spec §6, §18)
-        saveGeneratedPaperRecord({
+        // 3) Persist the generated_papers record (Spec §6, §18) together with
+        //    the exact questions it selected. Both must land in Supabase: the
+        //    Generated Question Papers page reads the archive from the database,
+        //    never from browser state. The paper is kept in the UI either way so
+        //    a failed save never costs the user their work.
+        const selectedQuestionsForArchive = [
+          ...(newPaper.partAQuestions || []),
+          ...(newPaper.partBQuestions || []),
+          ...(newPaper.partCQuestions || [])
+        ].map((item: any) => ({
+          questionId: item.questionId,
+          questionNumber: item.questionNumber,
+          unit: item.question?.unit ?? null,
+          part: item.question?.part ?? null,
+          marks: item.question?.marks ?? null,
+          btl: item.question?.bloomsLevel ?? item.question?.bl ?? null,
+          co: item.question?.co ?? null,
+          pi: item.question?.pi ?? null,
+          questionText: item.question?.questionText ?? null
+        }));
+
+        const archiveResult = await saveGeneratedPaperRecord({
           paperCode: newPaper.paperCode,
           subjectId: dbIds.subjectId,
           subjectCode: newPaper.subjectCode,
@@ -663,11 +908,26 @@ export const GeneratePaperWizard: React.FC = () => {
           localPaperId: newPaper.id,
           questionBankSource: iatSourceSelected ? 'IAT_GENERATED' : 'ORIGINAL',
           iatGeneratedBankId: iatSourceSelected ? selectedIatBankId : null,
-          iatGeneratedBankName: iatSourceSelected ? (selectedIatBank?.name ?? null) : null
-        }, authSession?.token || '').catch(() => {});
+          iatGeneratedBankName: iatSourceSelected ? (selectedIatBank?.name ?? null) : null,
+          questionBankId: iatSourceSelected ? selectedIatBankId : (originalBank?.id ?? null),
+          questions: selectedQuestionsForArchive
+        }, authSession?.token || '');
 
         setIsGenerating(false);
         setActivePaper(newPaper);
+
+        if (!archiveResult.success) {
+          // Never claim success when the database write failed.
+          setArchiveSaveError(archiveResult.error || 'The generated paper could not be saved to the database.');
+          showToast(archiveResult.error || 'The generated paper could not be saved to the database.');
+          setCurrentStep(6);
+          return;
+        }
+
+        setArchiveSaveError(null);
+        if (typeof archiveResult.fileName === 'string' && archiveResult.fileName) {
+          setActivePaper(prev => (prev ? { ...prev, fileName: archiveResult.fileName } : prev));
+        }
         setCurrentStep(6);
       }
     }, 350);
@@ -691,15 +951,27 @@ export const GeneratePaperWizard: React.FC = () => {
 
   if (activePaper && currentStep === 6) {
     return (
-      <PaperPreview
-        paper={activePaper}
-        onBack={() => {
-          setActivePaper(null);
-          setPaperToReviewId(null);
-          // Spec §2 — returning to the wizard always restarts at STEP 1
-          setCurrentStep(1);
-        }}
-      />
+      <div className="space-y-4">
+        {archiveSaveError && (
+          <div role="alert" className="rounded-2xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+            <p className="font-bold">This paper was NOT saved to the database.</p>
+            <p className="mt-1">{archiveSaveError}</p>
+            <p className="mt-1 text-xs text-red-700/80">
+              Your paper is still shown below so nothing is lost, but it will not appear on the Generated
+              Question Papers page until the database save succeeds.
+            </p>
+          </div>
+        )}
+        <PaperPreview
+          paper={activePaper}
+          onBack={() => {
+            setActivePaper(null);
+            setPaperToReviewId(null);
+            // Spec §2 — returning to the wizard always restarts at STEP 1
+            setCurrentStep(1);
+          }}
+        />
+      </div>
     );
   }
 
@@ -787,12 +1059,15 @@ export const GeneratePaperWizard: React.FC = () => {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {(activeAcademicYearsList.length > 0 ? activeAcademicYearsList.map(y => y.year_label) : academicYears).map((yr) => {
+            {/* ACTIVE academic years only, straight from the database. There is
+                no hardcoded year and no fallback to inactive sessions. */}
+            {activeAcademicYearsList.map((y) => {
+              const yr = y.year_label;
               const isSelected = selectedAcademicYear === yr;
               return (
                 <div
-                  key={yr}
-                  onClick={() => setSelectedAcademicYear(yr)}
+                  key={y.id}
+                  onClick={() => handleAcademicYearSelect(yr)}
                   className={`rounded-2xl border p-5 cursor-pointer transition-all ${
                     isSelected
                       ? 'border-[#D71945] bg-[#FFF0F3] shadow-md shadow-[#D71945]/10 ring-2 ring-[#D71945]'
@@ -809,12 +1084,23 @@ export const GeneratePaperWizard: React.FC = () => {
                     {yr}
                   </h3>
                   <div className="mt-2 text-xs text-[#64748B]">
-                    {yr === activeAcademicYearsList[0]?.year_label ? 'Current Active Academic Year' : 'Academic Year Session'}
+                    Active Academic Year
                   </div>
                 </div>
               );
             })}
           </div>
+
+          {activeAcademicYearsList.length === 0 && (
+            <div className="rounded-2xl border border-dashed border-gray-300 p-6 text-center bg-gray-50/50">
+              <p className="text-sm font-bold text-gray-800">
+                No active academic years are available.
+              </p>
+              <p className="text-xs text-gray-500 mt-1">
+                Activate an academic year in Academic Year management before generating a paper.
+              </p>
+            </div>
+          )}
 
           <div className="flex justify-end pt-4 border-t border-[#E5E7EB]">
             <button
@@ -1050,19 +1336,30 @@ export const GeneratePaperWizard: React.FC = () => {
               <div className="col-span-1 sm:col-span-2 rounded-2xl border border-dashed border-gray-300 p-8 text-center bg-gray-50/50">
                 <AlertCircle className="h-8 w-8 text-amber-500 mx-auto mb-2" />
                 <h4 className="text-sm font-bold text-gray-800">
-                  No subjects available for the selected academic year and department.
+                  No active subjects available for the selected academic year and department.
                 </h4>
                 <p className="text-xs text-gray-500 mt-1 max-w-md mx-auto">
-                  There are no active subjects registered under {selectedDeptScope === 'COMMON' ? 'selected common departments' : selectedDept} for session {selectedAcademicYear}.
+                  There are no active subjects registered under{' '}
+                  {selectedDeptScope === 'COMMON' ? 'the selected common departments' : (selectedDept || 'the selected department')}{' '}
+                  for session {selectedAcademicYear}.
                 </p>
               </div>
             ) : (
               deptSubjects.map((sub) => {
-                const isSelected = selectedSubject === sub.code;
+                // Compare by database id — two rows may share a subject code
+                // when they belong to different years or departments.
+                const isSelected = selectedSubjectId === sub.id;
+                const subDeptCode =
+                  sub.departments?.department_code ||
+                  activeDepartmentsList.find((d) => d.id === sub.department_id)?.department_code ||
+                  '';
+                const subSemester = sub.semester ? parseInt(sub.semester, 10) || 1 : 1;
+                const subRegulation = sub.regulation || '';
+                const subQuestionCount = questionCounts[sub.subject_code] ?? 0;
                 return (
                   <div
                     key={sub.id}
-                    onClick={() => handleSubjectSelect(sub.code)}
+                    onClick={() => handleSubjectSelect(sub.id)}
                     className={`rounded-2xl border p-5 cursor-pointer transition-all ${
                       isSelected
                         ? 'border-[#1976D2] bg-[#EAF3FF] shadow-md shadow-[#1976D2]/10 ring-2 ring-[#1976D2]'
@@ -1071,20 +1368,26 @@ export const GeneratePaperWizard: React.FC = () => {
                   >
                     <div className="flex items-center justify-between">
                       <span className="rounded-lg bg-white px-2 py-0.5 font-mono text-xs font-extrabold text-[#1976D2] border border-[#E5E7EB]">
-                        {sub.code}
+                        {sub.subject_code}
                       </span>
                       {isSelected && <CheckCircle2 className="h-5 w-5 text-[#1976D2]" />}
                     </div>
                     <h3 className="mt-3 font-extrabold text-base text-[#111827]">
-                      {sub.name}
+                      {sub.subject_name}
                     </h3>
                     <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-[#64748B]">
-                      <span>Semester {sub.semester}</span>
+                      <span>Semester {subSemester}</span>
                       <span>•</span>
-                      <span>{sub.regulation}</span>
+                      <span>{subRegulation || '—'}</span>
+                      {subDeptCode && (
+                        <>
+                          <span>•</span>
+                          <span>{subDeptCode}</span>
+                        </>
+                      )}
                       <span>•</span>
-                      {/* Spec §9/§15 — real DB count, with explicit loading and
-                          error states. A failure never displays as 0. */}
+                      {/* Real DB count, with explicit loading and error states.
+                          A failure never displays as 0. */}
                       {questionCountsLoading && !questionCountsLoaded ? (
                         <span className="inline-flex items-center gap-1.5 text-[#64748B]">
                           <Loader2 className="h-3 w-3 animate-spin" /> Loading question count…
@@ -1098,7 +1401,7 @@ export const GeneratePaperWizard: React.FC = () => {
                         </span>
                       ) : (
                         <span className="font-bold text-[#111827]">
-                          {sub.totalQuestions} {sub.totalQuestions === 1 ? 'Question' : 'Questions'} in Bank
+                          {subQuestionCount} {subQuestionCount === 1 ? 'Question' : 'Questions'} in Bank
                         </span>
                       )}
                     </div>
@@ -1117,10 +1420,10 @@ export const GeneratePaperWizard: React.FC = () => {
               <span>Back</span>
             </button>
             <button
-              disabled={deptSubjects.length === 0}
+              disabled={!selectedSubjectRecord}
               onClick={() => setCurrentStep(4)}
               className={`flex items-center gap-2 rounded-xl px-6 py-2.5 text-xs font-extrabold shadow-md transition-all ${
-                deptSubjects.length === 0
+                !selectedSubjectRecord
                   ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none'
                   : 'bg-[#D71945] text-white shadow-[#D71945]/25 hover:bg-[#c0153c] cursor-pointer'
               }`}
@@ -1356,9 +1659,9 @@ export const GeneratePaperWizard: React.FC = () => {
             </button>
             <button
               onClick={() => setCurrentStep(5)}
-              disabled={iatSourceBlocked}
+              disabled={iatSourceBlocked || !selectedSubjectRecord}
               className={`flex items-center gap-2 rounded-xl px-6 py-2.5 text-xs font-extrabold text-white shadow-md ${
-                iatSourceBlocked
+                iatSourceBlocked || !selectedSubjectRecord
                   ? 'cursor-not-allowed bg-gray-300 text-gray-500 shadow-none'
                   : 'bg-[#D71945] shadow-[#D71945]/25 hover:bg-[#c0153c] cursor-pointer'
               }`}
@@ -1641,10 +1944,21 @@ export const GeneratePaperWizard: React.FC = () => {
                 {canGenerate ? (
                   <button
                     onClick={handleStartGeneration}
-                    className="flex items-center gap-2 rounded-xl bg-[#D71945] px-6 py-3 text-xs font-extrabold text-white shadow-md shadow-[#D71945]/25 hover:bg-[#c0153c] active:scale-[0.98] transition-all cursor-pointer"
+                    disabled={generationBlocked || originalPoolLoading}
+                    className={`flex items-center gap-2 rounded-xl px-6 py-3 text-xs font-extrabold shadow-md transition-all ${
+                      generationBlocked || originalPoolLoading
+                        ? 'bg-gray-300 text-gray-500 shadow-none cursor-not-allowed'
+                        : 'bg-[#D71945] text-white shadow-[#D71945]/25 hover:bg-[#c0153c] active:scale-[0.98] cursor-pointer'
+                    }`}
                   >
                     <Sparkles className="h-4 w-4" />
-                    <span>Generate Examination Paper (Set {nextSetLetter})</span>
+                    <span>
+                      {originalPoolLoading
+                        ? 'Loading question bank…'
+                        : generationBlocked
+                          ? 'Question bank not available'
+                          : `Generate Examination Paper (Set ${nextSetLetter})`}
+                    </span>
                   </button>
                 ) : (
                   <button

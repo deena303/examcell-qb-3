@@ -4,14 +4,14 @@
  * Token is passed in Authorization header — never stored in localStorage.
  */
 
-const API_BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/api';
+export const API_BASE = (import.meta as any).env?.VITE_API_BASE_URL || '/api';
 
 /**
  * Safely handles parsing JSON responses.
  * Detects HTML/plain-text responses (e.g., from Netlify routing misconfiguration)
  * and produces informative error messages instead of SyntaxError: Unexpected token '<'.
  */
-async function safeJsonParse<T>(res: Response, endpointDesc: string): Promise<T> {
+export async function safeJsonParse<T>(res: Response, endpointDesc: string): Promise<T> {
   const contentType = res.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) {
     const rawText = await res.text();
@@ -29,6 +29,7 @@ async function safeJsonParse<T>(res: Response, endpointDesc: string): Promise<T>
 export interface LoginResponse {
   success: boolean;
   token: string;
+  mustChangePassword?: boolean;
   user: {
     id: string;
     email: string;
@@ -251,14 +252,39 @@ export async function updateSubject(id: string, updates: Partial<SubjectRecord>,
   return data;
 }
 
-export async function deleteSubject(id: string, token: string): Promise<{ id: string; _action: string; message: string }> {
-  const res = await fetch(`${API_BASE}/subjects/${id}`, {
+export interface SubjectDependency {
+  key: string;
+  table: string;
+  label: string;
+  count: number;
+  hint: string;
+}
+
+export interface SubjectDeleteResult {
+  id: string;
+  _action: 'deleted' | 'blocked';
+  message: string;
+  dependencies?: SubjectDependency[];
+  cascaded?: Array<{ table: string; label: string; count: number }>;
+}
+
+export async function deleteSubject(id: string, token: string, cascade = false): Promise<SubjectDeleteResult> {
+  const res = await fetch(`${API_BASE}/subjects/${id}${cascade ? '?cascade=true' : ''}`, {
     method: 'DELETE',
-    headers: { 'Accept': 'application/json', Authorization: `Bearer ${token}` }
+    headers: { Accept: 'application/json', Authorization: `Bearer ${token}` }
   });
   const data = await safeJsonParse<any>(res, `DELETE /subjects/${id}`);
-  if (!res.ok) throw new Error(data.error || 'Failed to delete subject.');
-  return data;
+  // 409 means "dependent records exist" — the caller needs the report, not a throw.
+  if (res.status === 409 && data?._action === 'blocked') {
+    return {
+      id: data.id ?? id,
+      _action: 'blocked',
+      message: data.error || 'This subject still has dependent records.',
+      dependencies: Array.isArray(data.dependencies) ? data.dependencies : []
+    };
+  }
+  if (!res.ok) throw new Error(data?.error || 'Failed to delete subject.');
+  return data as SubjectDeleteResult;
 }
 
 // ============================================================
@@ -479,7 +505,12 @@ export async function trackPaperSet(params: {
   }
 }
 
-/** Persists the generated_papers record (Spec §6) incl. principal_request_id (Spec §18). */
+/**
+ * Persists the generated_papers record (Spec §6) incl. principal_request_id (Spec §18).
+ *
+ * The read side of the archive lives in services/generatedPapersApi.ts — this is
+ * the write side.
+ */
 export async function saveGeneratedPaperRecord(payload: {
   paperCode: string;
   subjectId?: string | null;
@@ -501,7 +532,32 @@ export async function saveGeneratedPaperRecord(payload: {
   questionBankSource?: 'ORIGINAL' | 'IAT_GENERATED';
   iatGeneratedBankId?: string | null;
   iatGeneratedBankName?: string | null;
-}, token: string): Promise<{ success: boolean; fileName?: string; error?: string; code?: string }> {
+  /** The bank the questions were drawn from, stored for provenance. */
+  questionBankId?: string | null;
+  /**
+   * The questions selected during generation. Persisted as references to the
+   * real question rows via `generated_paper_questions` so the archive can be
+   * re-rendered after a browser refresh.
+   */
+  questions?: Array<{
+    questionId: string;
+    questionNumber?: string;
+    unit?: number;
+    part?: string;
+    marks?: number;
+    btl?: string;
+    co?: string;
+    pi?: string;
+    questionText?: string;
+  }>;
+}, token: string): Promise<{
+  success: boolean;
+  fileName?: string;
+  questionSelections?: number;
+  questionMappingsAvailable?: boolean;
+  error?: string;
+  code?: string;
+}> {
   try {
     const res = await fetch(`${API_BASE}/paper-sets/paper`, {
       method: 'POST',
@@ -510,7 +566,12 @@ export async function saveGeneratedPaperRecord(payload: {
     });
     const data = await safeJsonParse<any>(res, 'POST /paper-sets/paper');
     if (!res.ok) return { success: false, error: data.error || 'Failed to save paper record.', code: data.code };
-    return { success: true, fileName: data.fileName };
+    return {
+      success: true,
+      fileName: data.fileName,
+      questionSelections: data.questionSelections,
+      questionMappingsAvailable: data.questionMappingsAvailable
+    };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -847,3 +908,82 @@ export async function fetchPrincipals(token: string): Promise<Array<{ id: string
     return [];
   }
 }
+
+// ============================================================
+// USER MANAGEMENT
+// ============================================================
+
+export interface UserAccountRecord {
+  id: string;
+  email: string;
+  role: 'SUPER_ADMIN' | 'EXAM_CELL' | 'PRINCIPAL';
+  name: string;
+  status: 'active' | 'inactive';
+  department?: string | null;
+  must_change_password?: boolean;
+  created_at: string;
+}
+
+/**
+ * List users visible to the current role.
+ * Exam Cell sees all non-Super-Admin accounts.
+ * Super Admin sees all accounts.
+ */
+export async function fetchUsers(token: string): Promise<UserAccountRecord[]> {
+  try {
+    const res = await fetch(`${API_BASE}/users`, {
+      headers: { 'Accept': 'application/json', Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) return [];
+    const data = await safeJsonParse<any>(res, 'GET /users');
+    return Array.isArray(data.users) ? data.users : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Create an external user with a temporary password.
+ * The temporary password is transmitted to the server only — never stored in
+ * frontend state, localStorage, or logs.
+ */
+export async function createExternalUser(params: {
+  name: string;
+  email: string;
+  role: 'EXAM_CELL' | 'PRINCIPAL';
+  department?: string;
+  temporaryPassword: string;
+}, token: string): Promise<{ success: boolean; message: string; user?: UserAccountRecord; error?: string }> {
+  const res = await fetch(`${API_BASE}/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(params)
+  });
+  const data = await safeJsonParse<any>(res, 'POST /users');
+  if (!res.ok) throw new Error(data.error || 'Failed to create user.');
+  return data;
+}
+
+/**
+ * Change the authenticated user's password.
+ * Requires the current (temporary) password for verification.
+ * Never logs passwords.
+ */
+export async function changePassword(params: {
+  userId: string;
+  currentPassword: string;
+  newPassword: string;
+}, token: string): Promise<{ success: boolean; message: string }> {
+  const res = await fetch(`${API_BASE}/users/${params.userId}/change-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      currentPassword: params.currentPassword,
+      newPassword: params.newPassword
+    })
+  });
+  const data = await safeJsonParse<any>(res, `POST /users/${params.userId}/change-password`);
+  if (!res.ok) throw new Error(data.error || 'Failed to change password.');
+  return data;
+}
+

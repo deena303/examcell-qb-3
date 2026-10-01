@@ -33,6 +33,7 @@ import {
   QuestionBankListRow
 } from '../services/questionBankApi';
 import { Question, QuestionPart } from '../types';
+import { formatPi, formatCo, formatBtl } from '../utils/paperConstants';
 import { INITIAL_QUESTIONS } from '../data/initialData';
 
 /**
@@ -59,7 +60,9 @@ export const QuestionBankView: React.FC = () => {
     deleteQuestion,
     currentUser,
     setActiveTab,
-    authToken
+    authToken,
+    selectedAcademicYear: sharedAcademicYearLabel,
+    setSelectedAcademicYear: setSharedAcademicYear
   } = useApp();
 
   const dbSubjectsMapped = useMemo(() => {
@@ -85,6 +88,24 @@ export const QuestionBankView: React.FC = () => {
   const [filterAcademicYear, setFilterAcademicYear] = useState<string>('all');
   const [filterDepartment, setFilterDepartment] = useState<string>('all');
   const [filterSubjectCode, setFilterSubjectCode] = useState<string>('all');
+
+  // ---- Academic year is shared application state ----
+  // "all" means "no year filter chosen by this user". Once a year is shared
+  // from another screen, it becomes the filter here, and choosing a year here
+  // publishes it back, so one academic year drives the whole workflow.
+  useEffect(() => {
+    if (!sharedAcademicYearLabel) return;
+    setFilterAcademicYear((prev) =>
+      prev === 'all' || prev === sharedAcademicYearLabel ? sharedAcademicYearLabel : prev
+    );
+  }, [sharedAcademicYearLabel]);
+
+  useEffect(() => {
+    if (filterAcademicYear === 'all') return;
+    if (filterAcademicYear === sharedAcademicYearLabel) return;
+    setSharedAcademicYear(filterAcademicYear);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterAcademicYear]);
 
   // Question Banks from Supabase backend
   const [questionBanks, setQuestionBanks] = useState<QuestionBankListRow[]>([]);
@@ -414,6 +435,9 @@ export const QuestionBankView: React.FC = () => {
             type="button"
             onClick={() => {
               setFilterAcademicYear('all');
+              // Clear the shared year too, otherwise the sync effect above
+              // would immediately re-apply it and the reset would do nothing.
+              setSharedAcademicYear('');
               setFilterDepartment('all');
               setFilterSubjectCode('all');
             }}
@@ -868,7 +892,7 @@ export const QuestionBankView: React.FC = () => {
                           {q.id}
                         </td>
                         <td className="py-3.5 px-4">
-                          <p className="line-clamp-2 text-[#111827] font-medium leading-relaxed">
+                          <p className="line-clamp-2 text-justify font-serif text-[12px] leading-relaxed text-[#111827]">
                             {q.questionText}
                           </p>
                           <div className="mt-1 flex items-center gap-2 text-[10px] text-[#64748B] flex-wrap">
@@ -902,13 +926,15 @@ export const QuestionBankView: React.FC = () => {
                           </span>
                         </td>
                         <td className="py-3.5 px-2 font-bold text-[#D71945]">
-                          {q.bloomsLevel}
+                          {formatBtl(q.bloomsLevel)}
                         </td>
                         <td className="py-3.5 px-2 font-bold text-[#1976D2]">
-                          {q.co}
+                          {formatCo(q.co)}
                         </td>
-                        <td className="py-3.5 px-2 text-[#64748B] font-mono text-[11px]">
-                          {q.pi}
+                        {/* PI comes from this question's own record; never
+                            invented, and "-" when the record has none. */}
+                        <td className="py-3.5 px-2 text-center font-mono text-[11px] text-[#64748B]">
+                          {formatPi(q.pi)}
                         </td>
                         <td className="py-3.5 px-3">
                           <div className="flex items-center gap-1 text-[10px] font-bold">

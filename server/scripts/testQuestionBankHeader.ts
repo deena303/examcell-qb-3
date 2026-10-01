@@ -35,6 +35,7 @@ if (!g.document) {
 }
 
 const { generateIatBankHtml } = await import('../../src/utils/exportUtils');
+const { COLLEGE_NAME } = await import('../../src/utils/paperConstants');
 
 function buildBank(overrides: any) {
   return {
@@ -89,7 +90,10 @@ for (const [label, bank] of cases) {
   console.log('  college :', header?.[1]);
   console.log('  title   :', header?.[2]);
   console.log('  subject :', header?.[3]);
-  check('college header correct', header?.[1] === 'Mohamed Sathak AJ College of Engineering and Architecture');
+  // The header must equal the shared official-name constant, so the renderer and
+// this test can never drift apart.
+check('college header correct', header?.[1] === COLLEGE_NAME);
+check('college name is the full official name', /ARCHITECTURE$/i.test(header?.[1] || ''));
   check('title is QUESTION BANK', header?.[2] === 'QUESTION BANK');
   check('subject line = [COMPLETE CODE] - [NAME]', header?.[3] === `${bank.subjectCode} - ${bank.subjectName}`);
   check('no "IAT QUESTION BANK" anywhere', !/IAT QUESTION BANK/i.test(html));

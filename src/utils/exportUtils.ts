@@ -3,6 +3,18 @@ import html2canvas from 'html2canvas-pro';
 import { GeneratedPaper, PaperQuestionItem, IatGeneratedBankDetail, SelectedIatQuestion } from '../types';
 import { computeTableOfSpecification, generateTosHtml, normalizeBloomsLevel } from './tosUtils';
 import { buildPaperFileName, paperFileName } from './paperFileName';
+import { buildIatBankDocx, buildPaperDocx, downloadBlob, DOCX_MIME } from './docxExport';
+import {
+  COLLEGE_NAME,
+  COLLEGE_NAME_TITLE,
+  COLLEGE_SUBTITLE,
+  COLLEGE_LOCATION,
+  QUESTION_FONT_FAMILY,
+  QUESTION_FONT_SIZE_PT,
+  formatPi,
+  formatCo,
+  formatBtl
+} from './paperConstants';
 
 const INTERNAL_EXAM_WATERMARK_SRC = '/msajce_internal_exam_watermark.png';
 
@@ -70,8 +82,9 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
       print-color-adjust: exact;
     }
     body {
+      /* Question content typeface: Times New Roman 12pt. */
       font-family: "Times New Roman", Times, Georgia, serif;
-      font-size: 10pt;
+      font-size: 12pt;
       line-height: 1.35;
       color: #000;
       background-color: #fff;
@@ -220,6 +233,8 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
       margin-bottom: 12px;
     }
     table.endsem-table th, table.endsem-table td {
+      font-family: "Times New Roman", Times, Georgia, serif;
+      font-size: 12pt;
       border: 1px solid #000;
       padding: 5px 6px;
       vertical-align: top;
@@ -227,14 +242,16 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
     table.endsem-table th {
       background-color: #f1f5f9;
       font-weight: bold;
-      font-size: 9pt;
+      font-size: 10pt;
       text-align: center;
     }
+    /* Question text is fully justified; every metadata column is NOT. */
     .col-qno { width: 44px; text-align: center; font-weight: bold; }
-    .col-qtext { text-align: left; }
+    .col-qtext { text-align: justify; }
     .col-m { width: 38px; text-align: center; font-weight: bold; }
     .col-rbt { width: 42px; text-align: center; font-weight: bold; }
     .col-co { width: 44px; text-align: center; font-weight: bold; }
+    .col-pi { width: 44px; text-align: center; font-weight: bold; }
     .part-banner-th {
       text-align: center !important;
       font-weight: bold !important;
@@ -281,7 +298,7 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
 
     <!-- College Header (EE3251 exam.docx format) -->
     <div class="college-header">
-      <div class="college-name">Mohamed Sathak A J College of Engineering, Chennai - 603103</div>
+      <div class="college-name">${COLLEGE_NAME}, ${COLLEGE_LOCATION}</div>
       <div class="autonomous-tag">(An Autonomous Institution)</div>
       <div class="coe-tag">Office of the Controller of Examinations</div>
       <div class="exam-title">B.E. / B.Tech / M.E. DEGREE EXAMINATIONS, ${escapeHtml(sessionString)}</div>
@@ -325,6 +342,7 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
           <th class="col-m">M</th>
           <th class="col-rbt">RBT</th>
           <th class="col-co">CO</th>
+          <th class="col-pi">PI</th>
         </tr>
       </thead>
       <tbody>
@@ -333,8 +351,9 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
             <td class="col-qno">${escapeHtml(item.questionNumber)}</td>
             <td class="col-qtext">${escapeHtml(item.question.questionText)}</td>
             <td class="col-m">2</td>
-            <td class="col-rbt">${escapeHtml(normalizeBloomsLevel(item.question.bloomsLevel))}</td>
-            <td class="col-co">${escapeHtml(item.question.co || 'CO' + item.question.unit)}</td>
+            <td class="col-rbt">${escapeHtml(formatBtl(item.question.bloomsLevel))}</td>
+            <td class="col-co">${escapeHtml(formatCo(item.question.co))}</td>
+            <td class="col-pi">${escapeHtml(formatPi(item.question.pi))}</td>
           </tr>
         `).join('')}
       </tbody>
@@ -352,6 +371,7 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
           <th class="col-m">M</th>
           <th class="col-rbt">RBT</th>
           <th class="col-co">CO</th>
+          <th class="col-pi">PI</th>
         </tr>
       </thead>
       <tbody>
@@ -372,6 +392,7 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
             <th class="col-m">M</th>
             <th class="col-rbt">RBT</th>
             <th class="col-co">CO</th>
+            <th class="col-pi">PI</th>
           </tr>
         </thead>
         <tbody>
@@ -453,8 +474,9 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
       print-color-adjust: exact;
     }
     body {
+      /* Question content typeface: Times New Roman 12pt. */
       font-family: "Times New Roman", Times, Georgia, serif;
-      font-size: 10pt;
+      font-size: 12pt;
       line-height: 1.35;
       color: #000;
       background-color: #fff;
@@ -621,19 +643,22 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
       border: 1px solid #000;
       padding: 6px 8px;
       vertical-align: top;
+      font-family: "Times New Roman", Times, Georgia, serif;
+      font-size: 12pt;
     }
     table.iat-table th {
       background-color: #f1f5f9;
       font-weight: bold;
-      font-size: 9pt;
+      font-size: 10pt;
       text-align: center;
     }
+    /* Question text is fully justified; every metadata column is NOT. */
     .col-qno { width: 44px; text-align: center; font-weight: bold; }
-    .col-qtext { text-align: left; }
+    .col-qtext { text-align: justify; }
+    .col-marks { width: 48px; text-align: center; font-weight: bold; }
     .col-bl { width: 46px; text-align: center; font-family: monospace; font-size: 9pt; }
     .col-co { width: 46px; text-align: center; font-family: monospace; font-size: 9pt; }
     .col-pi { width: 50px; text-align: center; font-family: monospace; font-size: 8.5pt; color: #334155; }
-    .col-marks { width: 48px; text-align: right; font-weight: bold; }
     .iat-or-row {
       text-align: center;
       font-weight: bold;
@@ -715,7 +740,7 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
 
     <!-- Header (IAT QUESTION.doc format) -->
     <div class="college-header">
-      <div class="college-name">Mohamed Sathak A J College of Engineering</div>
+      <div class="college-name">${COLLEGE_NAME}</div>
       <div class="autonomous-tag">(An Autonomous Institution)</div>
       <div class="exam-title">B.E. / B.Tech DEGREE INTERNAL ASSESSMENT TEST-${iatTestNum}</div>
       <div class="semester-dept">
@@ -745,10 +770,10 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
         <tr>
           <th class="col-qno">Q.No</th>
           <th class="col-qtext">Question</th>
+          <th class="col-marks">Marks</th>
           <th class="col-bl">BL</th>
           <th class="col-co">CO</th>
           <th class="col-pi">PI</th>
-          <th class="col-marks">Marks</th>
         </tr>
       </thead>
       <tbody>
@@ -756,10 +781,10 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
           <tr>
             <td class="col-qno">${escapeHtml(item.questionNumber)}.</td>
             <td class="col-qtext">${escapeHtml(item.question.questionText)}</td>
-            <td class="col-bl">${escapeHtml(item.question.bloomsLevel || '')}</td>
-            <td class="col-co">${escapeHtml(item.question.co || 'CO' + item.question.unit)}</td>
-            <td class="col-pi">${escapeHtml(item.question.pi || '')}</td>
             <td class="col-marks">2</td>
+            <td class="col-bl">${escapeHtml(formatBtl(item.question.bloomsLevel))}</td>
+            <td class="col-co">${escapeHtml(formatCo(item.question.co))}</td>
+            <td class="col-pi">${escapeHtml(formatPi(item.question.pi))}</td>
           </tr>
         `).join('')}
       </tbody>
@@ -776,10 +801,10 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
         <tr>
           <th class="col-qno">Q.No</th>
           <th class="col-qtext">Question</th>
+          <th class="col-marks">Marks</th>
           <th class="col-bl">BL</th>
           <th class="col-co">CO</th>
           <th class="col-pi">PI</th>
-          <th class="col-marks">Marks</th>
         </tr>
       </thead>
       <tbody>
@@ -795,10 +820,10 @@ export function generatePrintablePaperHtml(paper: GeneratedPaper): string {
         <tr>
           <th class="col-qno">Q.No</th>
           <th class="col-qtext">Question</th>
+          <th class="col-marks">Marks</th>
           <th class="col-bl">BL</th>
           <th class="col-co">CO</th>
           <th class="col-pi">PI</th>
-          <th class="col-marks">Marks</th>
         </tr>
       </thead>
       <tbody>
@@ -856,10 +881,10 @@ function renderIatQuestionRow(item: PaperQuestionItem, defaultMarks: number): st
     <tr>
       <td class="col-qno">${escapeHtml(item.questionNumber)}.</td>
       <td class="col-qtext">${bodyHtml}</td>
-      <td class="col-bl">${escapeHtml(q.bloomsLevel || '')}</td>
-      <td class="col-co">${escapeHtml(q.co || 'CO' + q.unit)}</td>
-      <td class="col-pi">${escapeHtml(q.pi || '')}</td>
       <td class="col-marks">${defaultMarks}</td>
+      <td class="col-bl">${escapeHtml(formatBtl(q.bloomsLevel))}</td>
+      <td class="col-co">${escapeHtml(formatCo(q.co))}</td>
+      <td class="col-pi">${escapeHtml(formatPi(q.pi))}</td>
     </tr>
   `;
 }
@@ -884,6 +909,11 @@ function renderEndSemPartBRows(partB: PaperQuestionItem[]): string {
 
     let aRows = '';
     const qASubs = qA.question.subQuestions || [];
+    // Every sub-row of a split question keeps THAT question's own PI. PI is a
+    // property of the question record, so it is never taken from a neighbour.
+    const qaPi = formatPi(qA.question.pi);
+    const qaCo = formatCo(qA.question.co);
+    const qaBtl = formatBtl(qA.question.bloomsLevel);
     if (qASubs.length > 0) {
       aRows = `
         <tr>
@@ -892,8 +922,9 @@ function renderEndSemPartBRows(partB: PaperQuestionItem[]): string {
             <div><span style="font-weight:bold; margin-right:4px;">i.</span>${escapeHtml(qASubs[0])}</div>
           </td>
           <td class="col-m">${Math.ceil(13 / qASubs.length)}</td>
-          <td class="col-rbt">${escapeHtml(normalizeBloomsLevel(qA.question.bloomsLevel))}</td>
-          <td class="col-co">${escapeHtml(qA.question.co || 'CO' + qA.question.unit)}</td>
+          <td class="col-rbt">${escapeHtml(qaBtl)}</td>
+          <td class="col-co">${escapeHtml(qaCo)}</td>
+          <td class="col-pi">${escapeHtml(qaPi)}</td>
         </tr>
       `;
       for (let s = 1; s < qASubs.length; s++) {
@@ -903,8 +934,9 @@ function renderEndSemPartBRows(partB: PaperQuestionItem[]): string {
               <div><span style="font-weight:bold; margin-right:4px;">ii.</span>${escapeHtml(qASubs[s])}</div>
             </td>
             <td class="col-m">${13 - Math.ceil(13 / qASubs.length)}</td>
-            <td class="col-rbt">${escapeHtml(normalizeBloomsLevel(qA.question.bloomsLevel))}</td>
-            <td class="col-co">${escapeHtml(qA.question.co || 'CO' + qA.question.unit)}</td>
+            <td class="col-rbt">${escapeHtml(qaBtl)}</td>
+            <td class="col-co">${escapeHtml(qaCo)}</td>
+            <td class="col-pi">${escapeHtml(qaPi)}</td>
           </tr>
         `;
       }
@@ -914,8 +946,9 @@ function renderEndSemPartBRows(partB: PaperQuestionItem[]): string {
           <td class="col-qno">${escapeHtml(key)} a)</td>
           <td class="col-qtext">${escapeHtml(qA.question.questionText)}</td>
           <td class="col-m">13</td>
-          <td class="col-rbt">${escapeHtml(normalizeBloomsLevel(qA.question.bloomsLevel))}</td>
-          <td class="col-co">${escapeHtml(qA.question.co || 'CO' + qA.question.unit)}</td>
+          <td class="col-rbt">${escapeHtml(qaBtl)}</td>
+          <td class="col-co">${escapeHtml(qaCo)}</td>
+          <td class="col-pi">${escapeHtml(qaPi)}</td>
         </tr>
       `;
     }
@@ -923,6 +956,9 @@ function renderEndSemPartBRows(partB: PaperQuestionItem[]): string {
     let bRows = '';
     if (qB) {
       const qBSubs = qB.question.subQuestions || [];
+      const qbPi = formatPi(qB.question.pi);
+      const qbCo = formatCo(qB.question.co);
+      const qbBtl = formatBtl(qB.question.bloomsLevel);
       if (qBSubs.length > 0) {
         bRows = `
           <tr>
@@ -931,8 +967,9 @@ function renderEndSemPartBRows(partB: PaperQuestionItem[]): string {
               <div><span style="font-weight:bold; margin-right:4px;">i.</span>${escapeHtml(qBSubs[0])}</div>
             </td>
             <td class="col-m">${Math.ceil(13 / qBSubs.length)}</td>
-            <td class="col-rbt">${escapeHtml(normalizeBloomsLevel(qB.question.bloomsLevel))}</td>
-            <td class="col-co">${escapeHtml(qB.question.co || 'CO' + qB.question.unit)}</td>
+            <td class="col-rbt">${escapeHtml(qbBtl)}</td>
+            <td class="col-co">${escapeHtml(qbCo)}</td>
+            <td class="col-pi">${escapeHtml(qbPi)}</td>
           </tr>
         `;
         for (let s = 1; s < qBSubs.length; s++) {
@@ -942,8 +979,9 @@ function renderEndSemPartBRows(partB: PaperQuestionItem[]): string {
                 <div><span style="font-weight:bold; margin-right:4px;">ii.</span>${escapeHtml(qBSubs[s])}</div>
               </td>
               <td class="col-m">${13 - Math.ceil(13 / qBSubs.length)}</td>
-              <td class="col-rbt">${escapeHtml(normalizeBloomsLevel(qB.question.bloomsLevel))}</td>
-              <td class="col-co">${escapeHtml(qB.question.co || 'CO' + qB.question.unit)}</td>
+              <td class="col-rbt">${escapeHtml(qbBtl)}</td>
+              <td class="col-co">${escapeHtml(qbCo)}</td>
+              <td class="col-pi">${escapeHtml(qbPi)}</td>
             </tr>
           `;
         }
@@ -953,8 +991,9 @@ function renderEndSemPartBRows(partB: PaperQuestionItem[]): string {
             <td class="col-qno">b)</td>
             <td class="col-qtext">${escapeHtml(qB.question.questionText)}</td>
             <td class="col-m">13</td>
-            <td class="col-rbt">${escapeHtml(normalizeBloomsLevel(qB.question.bloomsLevel))}</td>
-            <td class="col-co">${escapeHtml(qB.question.co || 'CO' + qB.question.unit)}</td>
+            <td class="col-rbt">${escapeHtml(qbBtl)}</td>
+            <td class="col-co">${escapeHtml(qbCo)}</td>
+            <td class="col-pi">${escapeHtml(qbPi)}</td>
           </tr>
         `;
       }
@@ -962,14 +1001,14 @@ function renderEndSemPartBRows(partB: PaperQuestionItem[]): string {
 
     return `
       ${aRows}
-      ${qB ? `<tr><td colspan="5" class="or-separator-row">(OR)</td></tr>` : ''}
+      ${qB ? `<tr><td colspan="6" class="or-separator-row">(OR)</td></tr>` : ''}
       ${bRows}
     `;
   }).join('');
 }
 
 /**
- * Helper to render Part C rows for End Semester Examination (Q16, 15 marks with (OR), M, RBT, CO)
+ * Helper to render Part C rows for End Semester Examination (Q16, 15 marks with (OR), M, RBT, CO, PI)
  */
 function renderEndSemPartCRows(partC: PaperQuestionItem[]): string {
   const qA = partC[0];
@@ -980,17 +1019,19 @@ function renderEndSemPartCRows(partC: PaperQuestionItem[]): string {
       <td class="col-qno">16 a)</td>
       <td class="col-qtext">${qA ? escapeHtml(qA.question.questionText) : ''}</td>
       <td class="col-m">15</td>
-      <td class="col-rbt">${qA ? escapeHtml(normalizeBloomsLevel(qA.question.bloomsLevel)) : 'K3'}</td>
-      <td class="col-co">${qA ? escapeHtml(qA.question.co || 'CO5') : 'CO5'}</td>
+      <td class="col-rbt">${escapeHtml(formatBtl(qA ? qA.question.bloomsLevel : undefined))}</td>
+      <td class="col-co">${escapeHtml(formatCo(qA ? qA.question.co : undefined))}</td>
+      <td class="col-pi">${escapeHtml(formatPi(qA ? qA.question.pi : undefined))}</td>
     </tr>
     ${qB ? `
-      <tr><td colspan="5" class="or-separator-row">(OR)</td></tr>
+      <tr><td colspan="6" class="or-separator-row">(OR)</td></tr>
       <tr>
         <td class="col-qno">b)</td>
         <td class="col-qtext">${escapeHtml(qB.question.questionText)}</td>
         <td class="col-m">15</td>
-        <td class="col-rbt">${escapeHtml(normalizeBloomsLevel(qB.question.bloomsLevel))}</td>
-        <td class="col-co">${escapeHtml(qB.question.co || 'CO5')}</td>
+        <td class="col-rbt">${escapeHtml(formatBtl(qB.question.bloomsLevel))}</td>
+        <td class="col-co">${escapeHtml(formatCo(qB.question.co))}</td>
+        <td class="col-pi">${escapeHtml(formatPi(qB.question.pi))}</td>
       </tr>
     ` : ''}
   `;
@@ -999,41 +1040,11 @@ function renderEndSemPartCRows(partC: PaperQuestionItem[]): string {
 /**
  * Export Question Paper as a genuine Microsoft Word (.doc) document.
  */
-export function exportToWordDocument(paper: GeneratedPaper): void {
-  const htmlContent = generatePrintablePaperHtml(paper);
-  const wordHtml = `
-  <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-  <head>
-    <meta charset="utf-8">
-    <title>${escapeHtml(paper.subjectCode)} - ${escapeHtml(paper.paperCode)}</title>
-    <!--[if gte mso 9]>
-    <xml>
-      <w:WordDocument>
-        <w:View>Print</w:View>
-        <w:Zoom>100</w:Zoom>
-        <w:DoNotOptimizeForBrowser/>
-      </w:WordDocument>
-    </xml>
-    <![endif]-->
-  </head>
-  <body>
-    ${htmlContent}
-  </body>
-  </html>`;
-
-  const blob = new Blob(['\ufeff', wordHtml], {
-    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document;charset=utf-8'
-  });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  // Spec §5 — 24CS514_IAT_Set_A.docx / 24AM411_End_Semester_Set_A.docx
-  const safeFilename = paperFileName(paper, 'docx');
-  link.download = safeFilename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+export async function exportToWordDocument(paper: GeneratedPaper): Promise<void> {
+  // A genuine WordprocessingML package, not HTML with a .docx extension.
+  const blob = await buildPaperDocx(paper);
+  // Spec 5 - 24CS514_IAT_Set_A.docx / 24AM411_End_Semester_Set_A.docx
+  downloadBlob(blob, paperFileName(paper, 'docx'), DOCX_MIME);
 }
 
 /**
@@ -1251,33 +1262,39 @@ export function generateIatBankHtml(bank: IatGeneratedBankDetail): string {
 
       const renderPart = (label: string, sublabel: string, qs: SelectedIatQuestion[]) => {
         if (qs.length === 0) return '';
+        // Metadata comes from each question's own record. Nothing is matched by
+        // row index or question number, so a value can never drift onto a
+        // neighbouring question.
         const rows = qs.map((q, i) => `
           <tr>
-            <td style="padding:6px 8px; vertical-align:top; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; white-space:nowrap; color:#111827; width:28px;">${i + 1}.</td>
-            <td style="padding:6px 8px; vertical-align:top; font-family:'Times New Roman',Times,serif; font-size:12pt; line-height:1.5;">${esc(q.questionText)}</td>
-            <td style="padding:6px 8px; vertical-align:top; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center; white-space:nowrap; color:#111827;">${q.marks ?? '\u2013'}</td>
-            <td style="padding:6px 8px; vertical-align:top; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center; white-space:nowrap; color:#111827;">${esc(q.btl || q.bloomsLevel || '\u2013')}</td>
-            <td style="padding:6px 8px; vertical-align:top; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center; white-space:nowrap; color:#111827;">${esc(q.co || '\u2013')}</td>
+            <td class="qb-num">${i + 1}.</td>
+            <td class="qb-text">${esc(q.questionText)}</td>
+            <td class="qb-marks">${q.marks ?? '–'}</td>
+            <td class="qb-btl">${esc(formatBtl(q.btl || q.bloomsLevel))}</td>
+            <td class="qb-co">${esc(formatCo(q.co))}</td>
+            <td class="qb-pi">${esc(formatPi(q.pi))}</td>
           </tr>`).join('');
 
         return `
           <div style="margin-bottom:18px;">
-            <div style="font-family:'Times New Roman',Times,serif; font-weight:bold; font-size:13pt; letter-spacing:0.04em; text-transform:uppercase; color:#1E293B; margin-bottom:4px;">${label}</div>
-            <div style="font-family:'Times New Roman',Times,serif; font-size:12pt; color:#374151; margin-bottom:10px; font-style:italic;">${sublabel}</div>
-            <table style="width:100%; border-collapse:collapse; font-family:'Times New Roman',Times,serif; font-size:12pt;">
+            <div class="qb-part">${label}</div>
+            <div class="qb-part-sub">${sublabel}</div>
+            <table class="qb-table">
               <thead>
-                <tr style="background:#F7F8FA; border-bottom:1px solid #E5E7EB;">
-                  <th style="padding:5px 8px; text-align:center; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; text-transform:uppercase; width:28px;">#</th>
-                  <th style="padding:5px 8px; text-align:left; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; text-transform:uppercase;">Question</th>
-                  <th style="padding:5px 8px; text-align:center; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; text-transform:uppercase; width:56px;">Marks</th>
-                  <th style="padding:5px 8px; text-align:center; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; text-transform:uppercase; width:56px;">BTL</th>
-                  <th style="padding:5px 8px; text-align:center; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; text-transform:uppercase; width:56px;">CO</th>
+                <tr>
+                  <th class="qb-num">#</th>
+                  <th class="qb-text">Question</th>
+                  <th class="qb-marks">Marks</th>
+                  <th class="qb-btl">BTL</th>
+                  <th class="qb-co">CO</th>
+                  <th class="qb-pi">PI</th>
                 </tr>
               </thead>
               <tbody>${rows}</tbody>
             </table>
           </div>`;
       };
+
 
       const partAHtml = renderPart('PART A', 'Short Answer Questions', g.partA);
       const partBHtml = renderPart('PART B', 'Long Answer Questions', g.partB);
@@ -1354,6 +1371,35 @@ export function generateIatBankHtml(bank: IatGeneratedBankDetail): string {
     .summary-table th, .summary-table td { border: 1px solid #E5E7EB; }
     .summary-table th { background: #F1F5F9; font-family: "Times New Roman", Times, serif; font-size: 12pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.05em; padding: 6px 10px; color: #475569; }
     .divider { border: none; border-top: 2px dashed #CBD5E1; margin: 28px 0; }
+    /* ---- Question bank tables -----------------------------------------
+       Question content: Times New Roman 12pt, fully justified.
+       Metadata columns (number, marks, BTL, CO, PI) and the table header
+       are deliberately NOT justified. PI is the final metadata column. */
+    .qb-part {
+      font-family: "Times New Roman", Times, Georgia, serif;
+      font-size: 12pt; font-weight: bold; letter-spacing: 0.04em;
+      text-transform: uppercase; color: #1E293B; margin-bottom: 4px;
+    }
+    .qb-part-sub {
+      font-family: "Times New Roman", Times, Georgia, serif;
+      font-size: 10pt; color: #64748B; margin-bottom: 8px; font-style: italic;
+    }
+    .qb-table { width: 100%; border-collapse: collapse; }
+    .qb-table th, .qb-table td {
+      font-family: "Times New Roman", Times, Georgia, serif;
+      font-size: 12pt; padding: 5px 7px; vertical-align: top;
+      border-bottom: 1px solid #E5E7EB;
+    }
+    .qb-table th {
+      background: #F1F5F9; font-size: 10pt; text-transform: uppercase;
+      text-align: center; border-bottom: 1px solid #CBD5E1;
+    }
+    .qb-num   { width: 30px;  text-align: center; white-space: nowrap; color: #64748B; }
+    .qb-text  { text-align: justify; }
+    .qb-marks { width: 58px;  text-align: center; white-space: nowrap; }
+    .qb-btl   { width: 52px;  text-align: center; white-space: nowrap; }
+    .qb-co    { width: 58px;  text-align: center; white-space: nowrap; }
+    .qb-pi    { width: 58px;  text-align: center; white-space: nowrap; }
     @media print {
       .print-bar { display: none !important; }
       .paper-container { margin: 0; padding: 0; }
@@ -1371,8 +1417,8 @@ export function generateIatBankHtml(bank: IatGeneratedBankDetail): string {
 
   <div class="paper-container">
     <div class="college-header">
-      <div class="college-name">Mohamed Sathak AJ College of Engineering and Architecture</div>
-      <div class="college-sub">Affiliated to Anna University | Approved by AICTE | NBA Accredited</div>
+      <div class="college-name">${COLLEGE_NAME}</div>
+      <div class="college-sub">${COLLEGE_SUBTITLE}</div>
       <div class="doc-title">${documentTitle}</div>
       <div class="bank-subject">${subjectHeading}</div>
       <div class="bank-name">${esc(bank.name)}</div>
@@ -1441,40 +1487,15 @@ export function exportIatBankPdf(bank: IatGeneratedBankDetail): void {
  * Uses the same HTML→Word approach as the paper exporter — no new library needed.
  * Read-only: does NOT modify any database records.
  */
-export function exportIatBankWord(bank: IatGeneratedBankDetail): void {
+export async function exportIatBankWord(bank: IatGeneratedBankDetail): Promise<void> {
   if (!bank || !bank.questions || bank.questions.length === 0) {
     throw new Error('No questions found in this generated bank.');
   }
-  const htmlContent = generateIatBankHtml(bank);
-  const wordHtml = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-<head>
-  <meta charset="utf-8">
-  <title>${resolveQuestionBankSubjectCode(bank)} - ${(bank.name || 'Question Bank').replace(/[<>"]/g, '')}</title>
-  <!--[if gte mso 9]>
-  <xml>
-    <w:WordDocument>
-      <w:View>Print</w:View>
-      <w:Zoom>100</w:Zoom>
-      <w:DoNotOptimizeForBrowser/>
-    </w:WordDocument>
-  </xml>
-  <![endif]-->
-</head>
-<body>
-  ${htmlContent}
-</body>
-</html>`;
-
-  const blob = new Blob(['\ufeff', wordHtml], {
-    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document;charset=utf-8'
+  // A genuine WordprocessingML package, not HTML with a .docx extension.
+  const blob = await buildIatBankDocx(bank, {
+    subjectCode: resolveQuestionBankSubjectCode(bank),
+    subjectName: resolveQuestionBankSubjectName(bank),
   });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = iatBankFileName(bank, 'docx');
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, iatBankFileName(bank, 'docx'), DOCX_MIME);
 }
 

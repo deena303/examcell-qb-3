@@ -2,6 +2,7 @@ import express, { Response } from 'express';
 import { requireAuth, requireRole, AuthenticatedRequest } from '../middleware/authMiddleware';
 import { getSupabaseClient, isSupabaseConfigured } from '../services/supabaseQuestionBankService';
 import { countQuestionsForSubjects } from '../services/questionCountService';
+import { isValidSemester, normalizeSemester, SEMESTER_OPTIONS } from '../services/subjectSemester';
 
 const router = express.Router();
 
@@ -307,6 +308,10 @@ router.post('/subjects', requireAuth, requireRole('SUPER_ADMIN', 'EXAM_CELL'), a
   try {
     const { subject_code, subject_name, department_id, academic_year_id, semester, regulation, status, year_of_study, faculty_name, faculty_department } = req.body;
     if (!subject_code || !subject_name || !department_id || !academic_year_id) return res.status(400).json({ error: 'subject_code, subject_name, department_id, academic_year_id are required.' });
+    if (!semester) return res.status(400).json({ error: `Semester is required. Choose one of: ${SEMESTER_OPTIONS.join(', ')}.` });
+    if (!isValidSemester(semester)) {
+      return res.status(400).json({ error: `Invalid semester "${semester}". Choose one of: ${SEMESTER_OPTIONS.join(', ')}.` });
+    }
     const client = getSupabaseClient();
     const [{ data: yr }, { data: dept }] = await Promise.all([
       client.from('academic_years').select('id, status').eq('id', academic_year_id).single(),
@@ -322,7 +327,7 @@ router.post('/subjects', requireAuth, requireRole('SUPER_ADMIN', 'EXAM_CELL'), a
       subject_name: subject_name.trim(),
       department_id,
       academic_year_id,
-      semester: semester?.trim() || null,
+      semester: normalizeSemester(semester) || null,
       regulation: regulation?.trim() || null,
       status: status || 'active'
     };
@@ -347,13 +352,16 @@ router.put('/subjects/:id', requireAuth, requireRole('SUPER_ADMIN', 'EXAM_CELL')
   try {
     const { id } = req.params;
     const { subject_code, subject_name, department_id, academic_year_id, semester, regulation, status, year_of_study, faculty_name, faculty_department } = req.body;
+    if (semester !== undefined && !isValidSemester(semester)) {
+      return res.status(400).json({ error: `Invalid semester "${semester}". Choose one of: ${SEMESTER_OPTIONS.join(', ')}.` });
+    }
     const client = getSupabaseClient();
     const updates: Record<string, any> = { updated_at: new Date().toISOString() };
     if (subject_code !== undefined) updates.subject_code = subject_code.trim().toUpperCase();
     if (subject_name !== undefined) updates.subject_name = subject_name.trim();
     if (department_id !== undefined) updates.department_id = department_id;
     if (academic_year_id !== undefined) updates.academic_year_id = academic_year_id;
-    if (semester !== undefined) updates.semester = semester?.trim() || null;
+    if (semester !== undefined) updates.semester = normalizeSemester(semester);
     if (regulation !== undefined) updates.regulation = regulation?.trim() || null;
     if (status !== undefined) updates.status = status;
     if (year_of_study !== undefined) updates.year_of_study = year_of_study?.trim() || null;
@@ -371,22 +379,326 @@ router.put('/subjects/:id', requireAuth, requireRole('SUPER_ADMIN', 'EXAM_CELL')
   }
 });
 
+/**
+ * A record that belongs to one specific subject and therefore either blocks a
+ * subject deletion or can be removed together with it.
+ */
+interface SubjectDependency {
+  key: string;
+  table: string;
+  label: string;
+  count: number;
+  /** Row ids, so a cascade removes exactly what was inspected. */
+  ids: string[];
+  /** What these records are, for the confirmation dialog. */
+  hint: string;
+}
+
+/** Cached probe: does this table actually carry this column? */
+const subjectColumnCache = new Map<string, boolean>();
+async function hasColumn(client: any, table: string, column: string): Promise<boolean> {
+  const key = `${table}.${column}`;
+  const cached = subjectColumnCache.get(key);
+  if (cached !== undefined) return cached;
+  const { error } = await client.from(table).select(column).limit(1);
+  const available = !error;
+  subjectColumnCache.set(key, available);
+  return available;
+}
+
+/**
+ * Reads `id` plus whichever of the optional identity columns the table has.
+ *
+ * Paged explicitly: PostgREST caps a single response (typically 1000 rows) and
+ * `questions` is far larger than that, so an unpaged read would silently hide
+ * dependents behind the cap and let a deletion orphan them.
+ */
+async function readIdentityRows(client: any, table: string, optional: string[]): Promise<Array<Record<string, any>>> {
+  const present = await Promise.all(optional.map(async (c) => ((await hasColumn(client, table, c)) ? c : null)));
+  const columns = ['id', ...present.filter(Boolean) as string[]];
+  const select = columns.join(', ');
+  const PAGE = 1000;
+  const rows: Array<Record<string, any>> = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await client.from(table).select(select).order('id').range(from, from + PAGE - 1);
+    if (error) throw new Error(`inspect ${table}: ${error.message}`);
+    const page = (data || []) as Array<Record<string, any>>;
+    rows.push(...page);
+    if (page.length < PAGE) break;
+  }
+  return rows;
+}
+
+/** Splits an id list so a single request never exceeds PostgREST's URL limits. */
+function chunk<T>(items: T[], size = 200): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/**
+ * A subject is uniquely identified by academic_year_id + department_id +
+ * subject_code. The same subject_code legitimately exists under several
+ * departments and academic years, so every lookup below is scoped to that exact
+ * triple. Legacy rows only carry the denormalised `academic_year` /
+ * `department` text columns, which are resolved back to the same triple before
+ * matching — `question_banks.subject_id` is NULL for most imported banks and
+ * can therefore never be the sole key.
+ */
+async function collectSubjectDependencies(
+  client: any,
+  subject: Record<string, any>,
+  yearLabel: string | null,
+  departmentCodes: string[]
+): Promise<{ dependencies: SubjectDependency[]; bankIds: string[]; questionIds: string[]; iatBankIds: string[] }> {
+  const subjectId = subject.id;
+  const subjectCode = String(subject.subject_code || '').toUpperCase();
+  const yearId = subject.academic_year_id;
+  const departmentId = subject.department_id;
+
+  const matchesSubject = (row: Record<string, any>): boolean => {
+    if (row.subject_id) return row.subject_id === subjectId;
+    if (String(row.subject_code || '').toUpperCase() !== subjectCode) return false;
+    // Code matches — the year and department must match too.
+    if (row.academic_year_id) return row.academic_year_id === yearId;
+    if (row.academic_year) return row.academic_year === yearLabel;
+    if (row.department_id) return row.department_id === departmentId;
+    if (row.department) return departmentCodes.includes(String(row.department).toUpperCase());
+    // No year or department recorded at all: fall back to ownership by code.
+    return true;
+  };
+
+  // Question banks — both original and scrutinized/reduced ones.
+  const banks = (await readIdentityRows(client, 'question_banks', [
+    'subject_code', 'subject_id', 'academic_year', 'academic_year_id', 'department', 'department_id', 'parent_question_bank_id'
+  ])).filter(matchesSubject);
+  const bankIds = banks.map((b) => b.id);
+
+  // Questions inside those banks, plus anything already linked by subject_id.
+  const questions = (await readIdentityRows(client, 'questions', [
+    'subject_id', 'question_bank_id', 'department_scope', 'department_id', 'department'
+  ])).filter((q) =>
+    (q.subject_id && q.subject_id === subjectId) ||
+    (q.question_bank_id && bankIds.includes(q.question_bank_id))
+  );
+  const questionIds = questions.map((q) => q.id);
+
+  const papers = (await readIdentityRows(client, 'generated_papers', [
+    'subject_code', 'subject_id', 'academic_year', 'academic_year_id', 'department', 'department_id', 'paper_code'
+  ])).filter(matchesSubject);
+  const paperIds = papers.map((p) => p.id);
+  const paperCodes = papers.map((p) => p.paper_code).filter(Boolean);
+
+  // Question selection / usage mappings that belong to those papers.
+  const usageRows = await readIdentityRows(client, 'question_usage_history', ['paper_id', 'paper_code', 'question_id']);
+  const usage = usageRows.filter((u) =>
+    (u.paper_id && paperIds.includes(u.paper_id)) ||
+    (u.paper_code && paperCodes.includes(u.paper_code)) ||
+    (u.question_id && questionIds.includes(u.question_id))
+  );
+
+  const iatBanks = (await readIdentityRows(client, 'iat_generated_question_banks', [
+    'subject_code', 'subject_id', 'academic_year', 'academic_year_id', 'department', 'department_id'
+  ])).filter(matchesSubject);
+  const iatBankIds = iatBanks.map((b) => b.id);
+
+  const setTracking = (await readIdentityRows(client, 'paper_set_tracking', [
+    'subject_id', 'academic_year_id', 'department_id', 'exam_type', 'set_name', 'paper_code'
+  ])).filter((r) =>
+    (r.subject_id && r.subject_id === subjectId) ||
+    (r.academic_year_id === yearId && r.department_id === departmentId && r.paper_code && paperCodes.includes(r.paper_code))
+  );
+
+  const requests = (await readIdentityRows(client, 'additional_paper_requests', ['subject_id', 'academic_year_id', 'department_id']))
+    .filter((r) => r.subject_id === subjectId);
+  const requestIds = requests.map((r) => r.id);
+
+  const notifications = (await readIdentityRows(client, 'paper_request_notifications', ['request_id']))
+    .filter((n) => n.request_id && requestIds.includes(n.request_id));
+
+  const assignments = (await readIdentityRows(client, 'principal_paper_assignments', [
+    'subject_id', 'academic_year_id', 'department_id', 'paper_code', 'set_name'
+  ])).filter((r) =>
+    (r.subject_id && r.subject_id === subjectId) ||
+    (r.academic_year_id === yearId && r.department_id === departmentId && r.paper_code && paperCodes.includes(r.paper_code))
+  );
+
+  const dependencies: SubjectDependency[] = [];
+  const push = (key: string, table: string, label: string, rows: Array<Record<string, any>>, hint: string) => {
+    if (rows.length === 0) return;
+    dependencies.push({ key, table, label, count: rows.length, ids: rows.map((r) => r.id), hint });
+  };
+
+  push('question_banks', 'question_banks', 'Question bank(s)', banks,
+    'Original and/or scrutinized (reduced) question banks of this subject.');
+  push('questions', 'questions', 'Question(s)', questions,
+    'Questions stored inside those question banks.');
+  push('generated_papers', 'generated_papers', 'Generated paper(s)', papers,
+    'Papers already generated from this subject.');
+  push('question_usage_history', 'question_usage_history', 'Question usage record(s)', usage,
+    'Question selection / usage history of those generated papers.');
+  push('iat_generated_question_banks', 'iat_generated_question_banks', 'IAT generated bank(s)', iatBanks,
+    'Scrutinized / reduced banks generated from this subject.');
+  push('paper_set_tracking', 'paper_set_tracking', 'Generated set tracking record(s)', setTracking,
+    'Set tracking rows recorded for the generated sets.');
+  push('additional_paper_requests', 'additional_paper_requests', 'Additional paper request(s)', requests,
+    'Principal approval requests raised for this subject.');
+  push('paper_request_notifications', 'paper_request_notifications', 'Request notification(s)', notifications,
+    'Notifications belonging to those requests.');
+  push('principal_paper_assignments', 'principal_paper_assignments', 'Principal paper assignment(s)', assignments,
+    'Papers assigned to a principal for this subject.');
+
+  return { dependencies, bankIds, questionIds, iatBankIds };
+}
+
+/**
+ * DELETE /api/subjects/:id?cascade=true
+ *
+ * Without `cascade` the route only reports what still references the subject and
+ * refuses, so nothing is ever deleted by surprise. With `cascade` it removes
+ * exactly the records that belong exclusively to that subject — children first —
+ * and still refuses when any of them is shared with another department or is
+ * the source of a bank outside this subject.
+ */
 router.delete('/subjects/:id', requireAuth, requireRole('SUPER_ADMIN', 'EXAM_CELL'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
+    const cascade = req.query.cascade === 'true' || (req.body && req.body.cascade === true);
     const client = getSupabaseClient();
-    const { count: qbCount } = await client.from('question_banks').select('*', { count: 'exact', head: true }).eq('subject_id', id);
-    if (qbCount && qbCount > 0) {
-      const { data, error } = await client.from('subjects').update({ status: 'inactive', updated_at: new Date().toISOString() }).eq('id', id).select().single();
-      if (error) throw error;
-      auditLog(req, 'DEACTIVATE_SUBJECT', 'SUCCESS', { id, subject_code: data?.subject_code, reason: 'referenced_by_question_banks' });
-      return res.json({ ...data, _action: 'deactivated', message: 'Subject deactivated (referenced by question banks).' });
+
+    const { data: subject, error: fetchErr } = await client
+      .from('subjects')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (fetchErr) throw fetchErr;
+    if (!subject) return res.status(404).json({ error: 'Subject not found.' });
+
+    const [{ data: yr }, { data: dept }] = await Promise.all([
+      subject.academic_year_id
+        ? client.from('academic_years').select('id, year_label').eq('id', subject.academic_year_id).maybeSingle()
+        : Promise.resolve({ data: null as any }),
+      subject.department_id
+        ? client.from('departments').select('id, department_code, short_name').eq('id', subject.department_id).maybeSingle()
+        : Promise.resolve({ data: null as any }),
+    ]);
+    const yearLabel: string | null = yr?.year_label ?? null;
+    // question_banks / iat_generated_question_banks store the department as text.
+    const departmentCodes = [dept?.department_code, dept?.short_name]
+      .filter(Boolean)
+      .map((c) => String(c).toUpperCase());
+
+    const found = await collectSubjectDependencies(client, subject, yearLabel, departmentCodes);
+    const publicDeps = found.dependencies.map(({ key, table, label, count, hint }) => ({ key, table, label, count, hint }));
+    const idsFor = (table: string) => found.dependencies.find((d) => d.table === table)?.ids || [];
+
+    if (found.dependencies.length > 0) {
+      if (!cascade) {
+        const summary = found.dependencies.map((d) => `${d.count} ${d.label.toLowerCase()}`).join(', ');
+        auditLog(req, 'DELETE_SUBJECT', 'FAILED', {
+          id,
+          subject_code: subject.subject_code,
+          reason: 'dependent_records_exist',
+          dependencies: found.dependencies.map((d) => ({ table: d.table, count: d.count }))
+        });
+        return res.status(409).json({
+          error: `This subject still has dependent records (${summary}). They must be removed first, or deleted together with the subject.`,
+          _action: 'blocked',
+          dependencies: publicDeps
+        });
+      }
+
+      // ---- refuse to touch anything that is not exclusive to this subject ----
+      const conflicts: string[] = [];
+
+      const bankParentIdCol = await hasColumn(client, 'question_banks', 'parent_question_bank_id');
+      if (bankParentIdCol && found.bankIds.length > 0) {
+        const allBanks = await readIdentityRows(client, 'question_banks', ['parent_question_bank_id']);
+        const usedAsSource = allBanks.filter(
+          (b: any) => b.parent_question_bank_id && found.bankIds.includes(b.parent_question_bank_id) && !found.bankIds.includes(b.id)
+        );
+        if (usedAsSource.length > 0) {
+          conflicts.push(`${usedAsSource.length} bank(s) outside this subject were generated from its question bank(s)`);
+        }
+      }
+
+      if (found.questionIds.length > 0 && await hasColumn(client, 'question_departments', 'question_id')) {
+        const mappings = await readIdentityRows(client, 'question_departments', ['department_id']);
+        const shared = mappings.filter(
+          (m: any) => found.questionIds.includes(m.id) && m.department_id !== subject.department_id
+        );
+        if (shared.length > 0) {
+          conflicts.push(`${shared.length} question(s) are shared with another department`);
+        }
+      }
+
+      if (conflicts.length > 0) {
+        auditLog(req, 'DELETE_SUBJECT', 'FAILED', { id, subject_code: subject.subject_code, reason: 'shared_records', conflicts });
+        return res.status(409).json({
+          error: `Deletion stopped to protect shared data: ${conflicts.join('; ')}.`,
+          _action: 'blocked',
+          dependencies: publicDeps
+        });
+      }
+
+      // ---- dependency-ordered cascade: children before parents ----
+      const remove = async (table: string, ids: string[], label: string) => {
+        if (ids.length === 0) return;
+        for (const batch of chunk(ids)) {
+          const { error } = await client.from(table).delete().in('id', batch);
+          if (error) throw new Error(`could not delete ${label} from ${table}: ${error.message}`);
+        }
+        console.log(`[masterData] subject cascade: removed ${ids.length} ${label} from ${table}`);
+      };
+
+      if (found.iatBankIds.length > 0 && await hasColumn(client, 'iat_generated_questions', 'generated_bank_id')) {
+        const iatQuestionIds: string[] = [];
+        for (const batch of chunk(found.iatBankIds)) {
+          const { data, error } = await client.from('iat_generated_questions').select('id').in('generated_bank_id', batch);
+          if (error) throw new Error(`inspect iat_generated_questions: ${error.message}`);
+          iatQuestionIds.push(...(data || []).map((r: any) => r.id));
+        }
+        await remove('iat_generated_questions', iatQuestionIds, 'IAT generated question(s)');
+      }
+      await remove('paper_request_notifications', idsFor('paper_request_notifications'), 'request notification(s)');
+      await remove('principal_paper_assignments', idsFor('principal_paper_assignments'), 'principal paper assignment(s)');
+      await remove('question_usage_history', idsFor('question_usage_history'), 'question usage record(s)');
+      await remove('generated_papers', idsFor('generated_papers'), 'generated paper(s)');
+      await remove('paper_set_tracking', idsFor('paper_set_tracking'), 'generated set tracking record(s)');
+      await remove('additional_paper_requests', idsFor('additional_paper_requests'), 'additional paper request(s)');
+      await remove('iat_generated_question_banks', found.iatBankIds, 'IAT generated bank(s)');
+      await remove('questions', found.questionIds, 'question(s)');
+      await remove('question_banks', found.bankIds, 'question bank(s)');
     }
-    const { data: deletedData } = await client.from('subjects').select('subject_code, subject_name').eq('id', id).single();
-    const { error } = await client.from('subjects').delete().eq('id', id);
-    if (error) throw error;
-    auditLog(req, 'DELETE_SUBJECT', 'SUCCESS', { id, subject_code: deletedData?.subject_code, subject_name: deletedData?.subject_name });
-    return res.json({ id, _action: 'deleted', message: 'Subject deleted.' });
+
+    const { error: delErr } = await client.from('subjects').delete().eq('id', id);
+    if (delErr) {
+      if (delErr.code === '23503') {
+        return res.status(409).json({
+          error: 'This subject is still referenced by other records and was not deleted.',
+          _action: 'blocked',
+          dependencies: publicDeps
+        });
+      }
+      throw delErr;
+    }
+
+    auditLog(req, 'DELETE_SUBJECT', 'SUCCESS', {
+      id,
+      subject_code: subject.subject_code,
+      subject_name: subject.subject_name,
+      academic_year_id: subject.academic_year_id,
+      department_id: subject.department_id,
+      cascade,
+      removed: found.dependencies.map((d) => ({ table: d.table, count: d.count }))
+    });
+
+    return res.json({
+      id,
+      _action: 'deleted',
+      message: `Subject ${subject.subject_code} deleted.`,
+      cascaded: found.dependencies.map(({ table, label, count }) => ({ table, label, count }))
+    });
   } catch (err: any) {
     console.error('[masterData] DELETE subjects:', err?.message);
     return res.status(500).json({ error: err?.message || 'Failed to delete subject.' });

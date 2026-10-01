@@ -8,6 +8,7 @@ export interface LoginResult {
   role: 'SUPER_ADMIN' | 'EXAM_CELL' | 'PRINCIPAL';
   name: string;
   token: string;
+  mustChangePassword: boolean;
 }
 
 /**
@@ -28,7 +29,7 @@ export async function loginUser(email: string, password: string): Promise<LoginR
   // 1. Try exact email match
   let { data: user, error } = await client
     .from('user_accounts')
-    .select('id, email, password_hash, role, name, status')
+    .select('id, email, password_hash, role, name, status, must_change_password')
     .eq('email', normalizedEmail)
     .eq('status', 'active')
     .maybeSingle();
@@ -45,7 +46,7 @@ export async function loginUser(email: string, password: string): Promise<LoginR
     if (normalizedEmail.includes('superadmin') || normalizedEmail.includes('superaadmin')) {
       const { data: superUser, error: superErr } = await client
         .from('user_accounts')
-        .select('id, email, password_hash, role, name, status')
+        .select('id, email, password_hash, role, name, status, must_change_password')
         .eq('role', 'SUPER_ADMIN')
         .eq('status', 'active')
         .limit(1)
@@ -60,7 +61,7 @@ export async function loginUser(email: string, password: string): Promise<LoginR
     } else if (normalizedEmail.includes('examcell')) {
       const { data: examUser, error: examErr } = await client
         .from('user_accounts')
-        .select('id, email, password_hash, role, name, status')
+        .select('id, email, password_hash, role, name, status, must_change_password')
         .eq('role', 'EXAM_CELL')
         .eq('status', 'active')
         .limit(1)
@@ -75,7 +76,7 @@ export async function loginUser(email: string, password: string): Promise<LoginR
     } else if (normalizedEmail.includes('principal')) {
       const { data: principalUser, error: principalErr } = await client
         .from('user_accounts')
-        .select('id, email, password_hash, role, name, status')
+        .select('id, email, password_hash, role, name, status, must_change_password')
         .eq('role', 'PRINCIPAL')
         .eq('status', 'active')
         .limit(1)
@@ -131,7 +132,8 @@ export async function loginUser(email: string, password: string): Promise<LoginR
     email: user.email,
     role: user.role as 'SUPER_ADMIN' | 'EXAM_CELL' | 'PRINCIPAL',
     name: user.name,
-    token
+    token,
+    mustChangePassword: user.must_change_password === true
   };
 }
 

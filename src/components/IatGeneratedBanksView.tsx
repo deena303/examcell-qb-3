@@ -30,6 +30,7 @@ import {
   SourceBankOption
 } from '../services/iatQuestionBankApi';
 import { exportIatBankPdf, exportIatBankWord, resolveQuestionBankSubjectCode } from '../utils/exportUtils';
+import { formatPi, formatCo, formatBtl } from '../utils/paperConstants';
 
 const statusBadge: Record<string, string> = {
   Active: 'bg-emerald-100 text-emerald-800',
@@ -97,7 +98,7 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ detail, accentBg, accentHov
     setExportOpen(false);
     setExporting(true);
     try {
-      exportIatBankWord(detail);
+      await exportIatBankWord(detail);
       showToast('Word document (.docx) downloaded successfully.');
     } catch (err: any) {
       showToast(err?.message || 'Export failed.');
@@ -132,11 +133,12 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ detail, accentBg, accentHov
               {qs.map((q, i) => (
                 <tr key={`${q.sourceQuestionId}-${i}`} className="align-top hover:bg-[#F9FAFB]">
                   <td className="px-3 py-2.5 text-center font-black text-[#94A3B8]">{i + 1}</td>
-                  <td className="px-3 py-2.5 leading-relaxed">{q.questionText}</td>
+                  <td className="px-3 py-2.5 text-justify font-serif text-[12px] leading-relaxed">{q.questionText}</td>
                   <td className="px-2 py-2.5 text-center font-bold">{q.marks ?? '—'}</td>
-                  <td className="px-2 py-2.5 text-center font-mono text-[10px] font-bold">{q.btl || q.bloomsLevel || '—'}</td>
-                  <td className="px-2 py-2.5 text-center font-mono text-[10px] font-bold">{q.co || '—'}</td>
-                  <td className="px-2 py-2.5 text-center font-mono text-[10px] font-bold">{q.pi || '—'}</td>
+                  <td className="px-2 py-2.5 text-center font-mono text-[10px] font-bold">{formatBtl(q.btl || q.bloomsLevel)}</td>
+                  <td className="px-2 py-2.5 text-center font-mono text-[10px] font-bold">{formatCo(q.co)}</td>
+                  {/* PI comes from this question's own record; "-" when it has none. */}
+                  <td className="px-2 py-2.5 text-center font-mono text-[10px] font-bold">{formatPi(q.pi)}</td>
                 </tr>
               ))}
             </tbody>
@@ -321,7 +323,9 @@ export const IatGeneratedBanksView: React.FC = () => {
     dbSubjects,
     showToast,
     setActiveTab,
-    setIatGeneratorPrefill
+    setIatGeneratorPrefill,
+    selectedAcademicYear,
+    setSelectedAcademicYear
   } = useApp();
 
   const accent = isSuperAdminPortal ? 'purple' : 'rose';
@@ -352,7 +356,8 @@ export const IatGeneratedBanksView: React.FC = () => {
   const [confirmDelete, setConfirmDelete] = useState<IatGeneratedBank | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const years = activeAcademicYearsList.length > 0 ? activeAcademicYearsList : academicYearsList;
+  // Show ALL academic years (active + inactive) — generated banks may belong to any year.
+  const years = academicYearsList.length > 0 ? academicYearsList : activeAcademicYearsList;
   const depts = activeDepartmentsList.length > 0 ? activeDepartmentsList : [];
 
   const subjectOptions = useMemo(() => {
@@ -475,8 +480,17 @@ export const IatGeneratedBanksView: React.FC = () => {
   const selectClass =
     'w-full rounded-xl border border-[#E5E7EB] bg-white px-3.5 py-2.5 text-xs font-semibold text-[#111827] outline-none transition focus:border-[#D71945] focus:ring-2 focus:ring-[#D71945]/20 disabled:bg-[#F7F8FA] disabled:text-[#94A3B8]';
 
+  // ---- Academic year is shared application state ----
+  useEffect(() => {
+    if (!selectedAcademicYear) return;
+    setAcademicYear((prev) => (prev === selectedAcademicYear ? prev : selectedAcademicYear));
+  }, [selectedAcademicYear]);
+
   const clearFilters = () => {
     setAcademicYear('');
+    // Clearing the filter also clears the shared year, so the header does not
+    // keep advertising a year the user just removed.
+    setSelectedAcademicYear('');
     setDepartment('');
     setSubjectCode('');
     setSourceBankId('');
@@ -527,7 +541,9 @@ export const IatGeneratedBanksView: React.FC = () => {
             <select
               value={academicYear}
               onChange={(e) => {
-                setAcademicYear(e.target.value);
+                const nextYear = e.target.value;
+                setAcademicYear(nextYear);
+                setSelectedAcademicYear(nextYear);
                 setSubjectCode('');
                 setSourceBankId('');
               }}
