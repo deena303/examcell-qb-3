@@ -29,8 +29,6 @@ import { PrincipalPapersView } from './components/principal/PrincipalPapersView'
 import { PrincipalNotificationsView } from './components/principal/PrincipalNotificationsView';
 // Exam Cell Master Data & Audit views
 import { ExamCellSubjectBankView } from './components/ExamCellSubjectBankView';
-import { ExamCellAcademicYearsView } from './components/ExamCellAcademicYearsView';
-import { ExamCellDepartmentsView } from './components/ExamCellDepartmentsView';
 import { AuditLogView } from './components/AuditLogView';
 // IAT Question Bank Generator (Spec §1, §20, §21) — IAT-only, never End Semester
 import { IatQuestionBankGeneratorView } from './components/IatQuestionBankGeneratorView';
@@ -127,7 +125,20 @@ const AppContent: React.FC = () => {
 
       // Read-only reuse of existing screens
       case 'generated-papers': return <GeneratedPapersListView />;
-      case 'audit-logs': return <AuditLogView />;
+
+      // The audit log is strictly role-scoped. Only EXAM_CELL and SUPER_ADMIN may
+      // read it, and each sees only their own role's records. If a stale tab ever
+      // points here we say so instead of issuing a request the API will refuse.
+      case 'audit-logs':
+        return (
+          <div className="rounded-3xl border border-red-200 bg-red-50 p-8 text-center">
+            <h2 className="text-sm font-black text-red-900">Access Denied</h2>
+            <p className="mt-1 text-xs text-red-700">
+              Audit logs are available to the Exam Cell and Super Admin portals only, and each portal
+              sees just its own role&apos;s activity.
+            </p>
+          </div>
+        );
 
       // General
       case 'settings': return <SettingsView />;
@@ -136,6 +147,18 @@ const AppContent: React.FC = () => {
     }
   };
 
+  /**
+   * Exam Cell Portal.
+   *
+   * The Super Admin MANAGEMENT features are exposed here by rendering the very
+   * same components the Super Admin portal renders — same components, same
+   * services, same APIs, same database operations. No business logic is
+   * duplicated, and the Super Admin portal keeps working exactly as before.
+   *
+   * The portal is derived from the authenticated role, so a Super Admin always
+   * lands in the Super Admin portal and never sees the Exam Cell chrome (and
+   * vice versa). Every privileged action is still re-verified server-side.
+   */
   const renderExamCellContent = () => {
     switch (activeTab) {
       // Main Menu
@@ -144,21 +167,29 @@ const AppContent: React.FC = () => {
       case 'question-bank': return <QuestionBankView />;
       case 'iat-question-bank-generator': return <IatQuestionBankGeneratorView />;
       case 'iat-generated-banks': return <IatGeneratedBanksView />;
-      case 'exam-patterns': return <ExamPatternsView />;
       case 'internal-config': return <InternalConfigView />;
       case 'generate-paper': return <GeneratePaperWizard />;
       case 'generated-papers': return <GeneratedPapersListView />;
       case 'usage-history': return <UsageHistoryView />;
       case 'reports': return <AnalyticsView />;
 
-      // Master Data (DB Synced)
-      case 'academic-years': return <ExamCellAcademicYearsView />;
-      case 'departments': return <ExamCellDepartmentsView />;
+      // ---- Super Admin management features, reused as-is ----
+      // Subject management
+      case 'master-subjects': return <SubjectsView />;
+      // Academic Year management
+      case 'academic-years': return <AcademicYearsView />;
+      // Department management
+      case 'departments': return <DepartmentsView />;
+      // System configuration / Academic ERP settings
+      case 'exam-patterns': return <ExamPatternsView />;
+      // User management
+      case 'users': return <UsersManagementView />;
+      // Audit trail
+      case 'audit-logs': return <AuditLogView />;
+
+      // Master Data (DB Synced) — subject bank browser
       case 'subjects':
       case 'subject-bank': return <ExamCellSubjectBankView />;
-
-      // Administration
-      case 'audit-logs': return <AuditLogView />;
 
       // General
       case 'settings': return <SettingsView />;

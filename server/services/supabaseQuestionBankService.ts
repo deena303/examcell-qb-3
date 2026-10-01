@@ -302,40 +302,205 @@ export async function getQuestionBankCount(): Promise<number> {
   }
 }
 
+/** True when the error means the `bank_type` column (migration 012) is absent. */
+function isMissingBankTypeColumn(error: any): boolean {
+  const code = String(error?.code || '');
+  const msg = String(error?.message || '');
+  return code === '42703' || /column .*bank_type|bank_type.*does not exist/i.test(msg);
+}
+
 /**
- * Returns question bank records from Supabase, optionally filtered.
+ * Number of questions per question bank, computed from the `questions` table.
+ *
+ * The count is ALWAYS read from the database — it is never derived from browser
+ * state and never hardcoded. Identical in localhost and in production because
+ * both call this same function.
+ *
+ * `questions` rows carry no `academic_year` / `department` of their own, so the
+ * count is grouped by `question_bank_id`: the year + department + subject-code
+ * scope lives on the `question_banks` row itself.
+ *
+ * The read is PAGINATED. PostgREST caps a single response at 1000 rows, so a
+ * plain `.in()` request silently under-counts once the total question volume
+ * crosses that limit (which is exactly the kind of bug that only shows up on a
+ * real database). We page until a short page comes back, so the count is exact.
+ */
+async function getQuestionCountsByBankId(bankIds: string[]): Promise<Map<string, {
+  total: number;
+  partA: number;
+  partB: number;
+  partC: number;
+}>> {
+  const result = new Map<string, { total: number; partA: number; partB: number; partC: number }>();
+  if (bankIds.length === 0) return result;
+
+  const client = getSupabaseClient();
+  const PAGE_SIZE = 1000;
+  const MAX_PAGES = 200; // 200k questions is far beyond any single bank set
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const from = page * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
+
+    const { data, error } = await client
+      .from('questions')
+      .select('question_bank_id, part')
+      .in('question_bank_id', bankIds)
+      .order('id', { ascending: true })
+      .range(from, to);
+
+    if (error) {
+      // The banks are still returned; the count simply reads as 0 and the UI
+      // reports it as 0 rather than a blank cell.
+      console.warn('[Supabase] getQuestionCountsByBankId error:', error.message);
+      return result;
+    }
+
+    const rows = (data || []) as Array<{ question_bank_id: string | null; part: string | null }>;
+    for (const row of rows) {
+      const bankId = row?.question_bank_id;
+      if (!bankId) continue;
+      const bucket = result.get(bankId) || { total: 0, partA: 0, partB: 0, partC: 0 };
+      bucket.total += 1;
+      const part = String(row.part || '').trim().toUpperCase();
+      if (part === 'PART A' || part === 'A') bucket.partA += 1;
+      else if (part === 'PART C' || part === 'C') bucket.partC += 1;
+      else bucket.partB += 1;
+      result.set(bankId, bucket);
+    }
+
+    if (rows.length < PAGE_SIZE) break;
+  }
+
+  return result;
+}
+
+export interface QuestionBankRow extends Record<string, any> {
+  /** Real question count from the `questions` table. 0 when the bank is empty. */
+  total_questions: number;
+  part_a_count: number;
+  part_b_count: number;
+  part_c_count: number;
+  /** Units detected for this bank. 0 when unknown (never a hardcoded default). */
+  total_units: number | null;
+  bank_type: string;
+}
+
+/**
+ * Returns ORIGINAL question bank records from Supabase with their REAL question
+ * counts.
+ *
+ * Filtering is authoritative and server-side. A subject is identified ONLY by
+ * the combination Academic Year + Department + Subject Code, so the same subject
+ * code under two departments stays two separate question-bank sources.
+ *
+ * Generated (reduced) banks are excluded: `bank_type = 'IAT_GENERATED'` rows are
+ * listed by the IAT Generated Banks screen, and they hold no original questions.
  */
 export async function getQuestionBanks(filters?: {
   academicYear?: string;
   department?: string;
   subjectCode?: string;
-}) {
+}): Promise<QuestionBankRow[]> {
   if (!isSupabaseConfigured()) return [];
+
   try {
     const client = getSupabaseClient();
-    let query = client
-      .from('question_banks')
-      .select('*')
-      .order('created_at', { ascending: false });
 
-    if (filters?.subjectCode) {
-      query = query.eq('subject_code', filters.subjectCode);
-    }
-    if (filters?.academicYear) {
-      query = query.eq('academic_year', filters.academicYear);
-    }
-    if (filters?.department) {
-      query = query.eq('department', filters.department);
+    const applyFilters = (q: any) => {
+      let query = q;
+      if (filters?.subjectCode) {
+        query = query.eq('subject_code', filters.subjectCode);
+      }
+      if (filters?.academicYear) {
+        // Exact match only. A bank with a NULL year must never appear under a
+        // selected academic year.
+        query = query.eq('academic_year', filters.academicYear);
+      }
+      if (filters?.department) {
+        query = query.eq('department', filters.department);
+      }
+      return query;
+    };
+
+    let query = applyFilters(
+      client
+        .from('question_banks')
+        .select('*')
+        .eq('bank_type', 'ORIGINAL')
+        .order('created_at', { ascending: false })
+    );
+
+    let { data, error } = await query;
+
+    // Migration 012 not installed in this database — retry without bank_type.
+    if (error && isMissingBankTypeColumn(error)) {
+      const retry = applyFilters(
+        client
+          .from('question_banks')
+          .select('*')
+          .order('created_at', { ascending: false })
+      );
+      const result = await retry;
+      if (result.error) {
+        console.warn('[Supabase] getQuestionBanks error:', result.error.message);
+        return [];
+      }
+      data = result.data;
+      error = null;
     }
 
-    const { data, error } = await query;
     if (error) {
       console.warn('[Supabase] getQuestionBanks error:', error.message);
       return [];
     }
-    return data || [];
+
+    const rows = (data || []) as QuestionBankRow[];
+    const counts = await getQuestionCountsByBankId(rows.map((b) => b.id));
+
+    return rows.map((row) => {
+      const c = counts.get(row.id);
+      return {
+        ...row,
+        bank_type: row.bank_type || 'ORIGINAL',
+        total_units: typeof row.total_units === 'number' ? row.total_units : null,
+        total_questions: c ? c.total : 0,
+        part_a_count: c ? c.partA : 0,
+        part_b_count: c ? c.partB : 0,
+        part_c_count: c ? c.partC : 0
+      };
+    });
   } catch (err: any) {
     console.warn('[Supabase] getQuestionBanks error:', err?.message);
+    return [];
+  }
+}
+
+/**
+ * Returns every question belonging to ONE question bank.
+ *
+ * Scoped strictly by `question_bank_id`, which is the database-side expression of
+ * the Academic Year + Department + Subject Code identity. Questions belonging to
+ * another year, another department, another subject code, or another bank are
+ * never returned — even when they share the same `subject_code`.
+ */
+export async function getQuestionsForBank(bankId: string): Promise<Array<Record<string, any>>> {
+  if (!isSupabaseConfigured() || !bankId) return [];
+  try {
+    const client = getSupabaseClient();
+    const { data, error } = await client
+      .from('questions')
+      .select('*')
+      .eq('question_bank_id', bankId)
+      .order('part', { ascending: true })
+      .order('unit', { ascending: true });
+    if (error) {
+      console.warn('[Supabase] getQuestionsForBank error:', error.message);
+      return [];
+    }
+    return data || [];
+  } catch (err: any) {
+    console.warn('[Supabase] getQuestionsForBank error:', err?.message);
     return [];
   }
 }

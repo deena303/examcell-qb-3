@@ -140,6 +140,14 @@ router.post('/iat-question-banks/preview', ...iatAccess, async (req: Authenticat
       throw new IatFeatureError('Select an original question bank first.', 400, 'SOURCE_BANK_REQUIRED');
     }
 
+    // The Academic Year + Department + Subject Code the user actually selected.
+    // Verified against the source bank before a single question is chosen.
+    const selection = {
+      academicYear: str(req.body?.academicYear),
+      department: str(req.body?.department),
+      subjectCode: str(req.body?.subjectCode)
+    };
+
     // Determine generation mode
     const isUnitWise = Array.isArray(unitRequests) && unitRequests.length > 0;
 
@@ -149,6 +157,9 @@ router.post('/iat-question-banks/preview', ...iatAccess, async (req: Authenticat
       status: 'SUCCESS',
       metadata: {
         source_question_bank_id: sourceQuestionBankId,
+        academic_year: selection.academicYear,
+        department: selection.department,
+        subject_code: selection.subjectCode,
         requested_part_a: isUnitWise ? undefined : requestedPartA,
         requested_part_bc: isUnitWise ? undefined : requestedPartBC,
         unit_requests: isUnitWise ? unitRequests : undefined,
@@ -166,6 +177,7 @@ router.post('/iat-question-banks/preview', ...iatAccess, async (req: Authenticat
         requestedPartBC: 0,
         examType: resolvedExamType,
         seed: seed === undefined || seed === null ? undefined : Number(seed),
+        selection,
         unitRequests: unitRequests.map((r: any) => {
           const partA   = Number(r.partA   ?? 0) || 0;
           // Support both combined partBC and separate partB/partC from client
@@ -191,7 +203,8 @@ router.post('/iat-question-banks/preview', ...iatAccess, async (req: Authenticat
         requestedPartBC: Number(requestedPartBC) || 0,
         examType: resolvedExamType,
         seed: seed === undefined || seed === null ? undefined : Number(seed),
-        useGemini: Boolean(useGemini)
+        useGemini: Boolean(useGemini),
+        selection
       });
     }
 
@@ -246,6 +259,11 @@ router.post('/iat-question-banks', ...iatAccess, async (req: AuthenticatedReques
       name: str(name) || undefined,
       seed: seed === undefined || seed === null ? undefined : Number(seed),
       unitRequests: parsedUnitRequests,
+      selection: {
+        academicYear: str(req.body?.academicYear),
+        department: str(req.body?.department),
+        subjectCode: str(req.body?.subjectCode)
+      },
       user: {
         userId: req.user!.userId,
         email: req.user!.email,

@@ -1048,6 +1048,47 @@ async function assertNameAvailable(name: string): Promise<void> {
   }
 }
 
+/** Case/whitespace-insensitive comparison of two identity values. */
+function sameIdentityValue(a: unknown, b: unknown): boolean {
+  return String(a ?? '').trim().toUpperCase() === String(b ?? '').trim().toUpperCase();
+}
+
+/**
+ * The identity of a subject is ALWAYS Academic Year + Department + Subject Code.
+ *
+ * When the client sends its selection, the source bank must match it exactly.
+ * This is the server-side guarantee that a generation can never be reduced from
+ * another academic year, another department, or another subject code that merely
+ * looks similar.
+ *
+ * A null value on the bank is tolerated only when the client did not send the
+ * corresponding filter, so pre-existing untagged banks keep working.
+ */
+export function assertBankMatchesSelection(
+  bank: Record<string, any>,
+  selection: { academicYear?: string | null; department?: string | null; subjectCode?: string | null }
+): void {
+  const mismatches: string[] = [];
+
+  if (selection.subjectCode && !sameIdentityValue(bank.subject_code, selection.subjectCode)) {
+    mismatches.push(`subject code (selected ${selection.subjectCode}, bank ${bank.subject_code})`);
+  }
+  if (selection.department && bank.department && !sameIdentityValue(bank.department, selection.department)) {
+    mismatches.push(`department (selected ${selection.department}, bank ${bank.department})`);
+  }
+  if (selection.academicYear && bank.academic_year && !sameIdentityValue(bank.academic_year, selection.academicYear)) {
+    mismatches.push(`academic year (selected ${selection.academicYear}, bank ${bank.academic_year})`);
+  }
+
+  if (mismatches.length > 0) {
+    throw new IatFeatureError(
+      `The selected question bank does not match the selected Academic Year + Department + Subject (${mismatches.join('; ')}). Select the matching question bank and try again.`,
+      400,
+      'SOURCE_BANK_IDENTITY_MISMATCH'
+    );
+  }
+}
+
 // ====================================================================
 // Preview generation (Spec §4, §8, §14, §15)
 // ====================================================================
@@ -1062,6 +1103,11 @@ export interface GeneratePreviewParams {
   useGemini?: boolean;
   /** Unit-wise requests — if provided, unit-wise logic is used instead of global counts. */
   unitRequests?: UnitRequest[];
+  /**
+   * The client's Academic Year + Department + Subject Code selection. When
+   * present it is verified against the source bank before anything is selected.
+   */
+  selection?: { academicYear?: string | null; department?: string | null; subjectCode?: string | null };
 }
 
 export async function generateIatPreview(params: GeneratePreviewParams): Promise<IatPreview> {
@@ -1071,6 +1117,7 @@ export async function generateIatPreview(params: GeneratePreviewParams): Promise
   const seed = Number.isFinite(params.seed as number) ? (params.seed as number) : Math.floor(Math.random() * 2 ** 31);
 
   const bank = await getSourceBankHeader(params.sourceQuestionBankId);
+  if (params.selection) assertBankMatchesSelection(bank, params.selection);
   const questions = await loadSourceQuestions(params.sourceQuestionBankId);
   const stats = computeSourceStats(bank, questions);
 
@@ -1212,6 +1259,7 @@ export async function generateIatPreviewUnitWise(
     : Math.floor(Math.random() * 2 ** 31);
 
   const bank = await getSourceBankHeader(params.sourceQuestionBankId);
+  if (params.selection) assertBankMatchesSelection(bank, params.selection);
   const allQuestions = await loadSourceQuestions(params.sourceQuestionBankId);
 
   // Validate each unit's requests
@@ -1325,6 +1373,11 @@ export interface SaveGeneratedBankParams {
   /** If unit-wise mode was used, pass the original unit requests so the same
    *  generation path is re-used during save (ensures exact reproducibility). */
   unitRequests?: UnitRequest[];
+  /**
+   * The client's Academic Year + Department + Subject Code selection, verified
+   * against the source bank before the reduced bank is written.
+   */
+  selection?: { academicYear?: string | null; department?: string | null; subjectCode?: string | null };
 }
 
 export interface SaveGeneratedBankResult {
@@ -1364,14 +1417,16 @@ export async function saveGeneratedBank(
         requestedPartBC: params.requestedPartBC,
         examType,
         seed: params.seed,
-        unitRequests: params.unitRequests
+        unitRequests: params.unitRequests,
+        selection: params.selection
       })
     : await generateIatPreview({
         sourceQuestionBankId: params.sourceQuestionBankId,
         requestedPartA: params.requestedPartA,
         requestedPartBC: params.requestedPartBC,
         examType,
-        seed: params.seed
+        seed: params.seed,
+        selection: params.selection
       });
 
   const sourceBank = await getSourceBankHeader(params.sourceQuestionBankId);

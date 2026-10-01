@@ -77,7 +77,9 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
     activeDepartmentsList,
     dbSubjects,
     showToast,
-    setActiveTab
+    setActiveTab,
+    iatGeneratorPrefill,
+    setIatGeneratorPrefill
   } = useApp();
 
   const accent = isSuperAdminPortal ? 'purple' : 'rose';
@@ -138,22 +140,66 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
     setSuggestedName('');
   }, []);
 
-  // ---- Load ORIGINAL source banks ----
+  /**
+   * Consume a selection handed over from another screen ("Regenerate" on IAT
+   * Generated Banks). Without this the tab switch would land on an empty form,
+   * because these selectors are local component state.
+   *
+   * The subject identity is accepted only when a subject with that code really
+   * exists inside the given Academic Year + Department, so the prefill can
+   * never smuggle in a mismatched combination.
+   */
   useEffect(() => {
-    if (!token || !academicYear || !department) {
+    if (!iatGeneratorPrefill) return;
+    const { academicYear: year, department: dept, subjectCode: code, sourceBankId: bankId } = iatGeneratorPrefill;
+
+    const subjectExists = (dbSubjects || []).some((s) => {
+      const yearLabel = s.academic_years?.year_label || '';
+      const deptCode = s.departments?.department_code || '';
+      return s.subject_code === code && yearLabel === year && deptCode === dept;
+    });
+
+    setAcademicYear(year);
+    setDepartment(dept);
+    setSubjectCode(subjectExists ? code : '');
+    setSourceBankId(subjectExists ? bankId : '');
+    resetFromBankChange();
+    setIatGeneratorPrefill(null);
+
+    if (subjectExists) {
+      showToast(`Loaded the original question bank for ${year} / ${dept} / ${code}. Enter the new counts and generate.`);
+    } else {
+      showToast(`No subject "${code}" exists for ${year} / ${dept}. Please select the subject again.`);
+    }
+  }, [iatGeneratorPrefill, dbSubjects, resetFromBankChange, setIatGeneratorPrefill, showToast]);
+
+  // ---- Load ORIGINAL source banks ----
+  // Requires a COMPLETE subject identity. The server applies
+  // Academic Year + Department + Subject Code, so a code shared by several
+  // departments can never pull in another department's bank.
+  useEffect(() => {
+    if (!token || !academicYear || !department || !subjectCode) {
       setSourceBanks([]);
+      setSourceBankId('');
       return;
     }
     let cancelled = false;
     setBanksLoading(true);
-    fetchSourceQuestionBanks(token, { academicYear, department, subjectCode: subjectCode || undefined })
+    fetchSourceQuestionBanks(token, { academicYear, department, subjectCode })
       .then((rows) => {
         if (cancelled) return;
-        setSourceBanks(rows);
-        if (rows.length > 0 && !rows.some((b) => b.id === sourceBankId)) {
-          setSourceBankId(rows[0].id);
+        // Guard: never keep a bank that belongs to a different identity.
+        const scoped = rows.filter(
+          (b) =>
+            b.subject_code === subjectCode &&
+            (!b.academic_year || b.academic_year === academicYear) &&
+            (!b.department || b.department === department)
+        );
+        setSourceBanks(scoped);
+        if (scoped.length > 0 && !scoped.some((b) => b.id === sourceBankId)) {
+          setSourceBankId(scoped[0].id);
         }
-        if (rows.length === 0) setSourceBankId('');
+        if (scoped.length === 0) setSourceBankId('');
       })
       .catch((err) => {
         if (!cancelled) {
@@ -188,6 +234,9 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
   }, [token, sourceBankId]);
 
   // ---- Subject options ----
+  // A subject is identified ONLY by Academic Year + Department + Subject Code,
+  // so the option list is scoped to the selected year + department and the
+  // duplicate-suppression key includes the department.
   const subjectOptions = useMemo(() => {
     const rows = (dbSubjects || []).filter((s) => {
       const yearLabel = s.academic_years?.year_label || '';
@@ -196,11 +245,41 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
     });
     const seen = new Set<string>();
     return rows.filter((s) => {
-      if (seen.has(s.subject_code)) return false;
-      seen.add(s.subject_code);
+      const deptCode = s.departments?.department_code || '';
+      const key = `${s.subject_code}|${deptCode}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
       return true;
     });
   }, [dbSubjects, academicYear, department]);
+
+  /** The full subject record for the selected code inside the selected scope. */
+  const selectedSubjectRecord = useMemo(() => {
+    if (!subjectCode) return undefined;
+    return subjectOptions.find((s) => s.subject_code === subjectCode);
+  }, [subjectOptions, subjectCode]);
+
+  /** The source bank currently loaded for the Step 4 dropdown. */
+  const selectedSourceBank = useMemo(
+    () => sourceBanks.find((b) => b.id === sourceBankId) || null,
+    [sourceBanks, sourceBankId]
+  );
+
+  /**
+   * Generation requires a COMPLETE subject identity plus one loaded original
+   * question bank. A subject code on its own is never enough.
+   */
+  const selectionErrors = useMemo(() => {
+    const out: string[] = [];
+    if (!academicYear) out.push('Step 1 — select an Academic Year.');
+    if (!department) out.push('Step 2 — select a Department.');
+    if (!subjectCode) out.push('Step 3 — select a Subject.');
+    if (subjectCode && !selectedSubjectRecord) {
+      out.push(`Subject "${subjectCode}" does not exist for ${academicYear || 'the selected academic year'} / ${department || 'the selected department'}.`);
+    }
+    if (!sourceBankId) out.push('Step 4 — select the Original Question Bank.');
+    return out;
+  }, [academicYear, department, subjectCode, selectedSubjectRecord, sourceBankId]);
 
   // ---- Per-unit availability map ----
   const unitAvailability = useMemo(
@@ -233,7 +312,11 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
     return out;
   }, [stats, unitRequests, unitAvailability]);
 
-  const canGenerate = Boolean(stats) && unitValidationErrors.length === 0 && !generating;
+  const canGenerate =
+    Boolean(stats) &&
+    unitValidationErrors.length === 0 &&
+    selectionErrors.length === 0 &&
+    !generating;
 
   // ---- Update a single unit's count ----
   const setUnitField = (unit: number, field: 'partA' | 'partBC', raw: string) => {
@@ -249,6 +332,12 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
 
   // ---- Generate / Regenerate ----
   const runGeneration = async (useNewSeed: boolean) => {
+    // A subject identity is mandatory: nothing is generated without a complete
+    // Academic Year + Department + Subject Code and one loaded source bank.
+    if (selectionErrors.length > 0 || !sourceBankId) {
+      setErrors(selectionErrors);
+      return;
+    }
     // Final client-side normalization — BEFORE validation, so 0s are valid.
     const normalized = normalizeUnitRequestsForApi(unitRequests);
     const normalizedErrors: string[] = [];
@@ -284,6 +373,9 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
       const activeRequests = normalized.filter((r) => r.partA > 0 || r.partBC > 0);
       const result = await generateIatPreview(token, {
         sourceQuestionBankId: sourceBankId,
+        academicYear,
+        department,
+        subjectCode,
         requestedPartA: 0,
         requestedPartBC: 0,
         examType,
@@ -311,6 +403,10 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
   // ---- Save ----
   const handleSave = async () => {
     if (!preview) return;
+    if (selectionErrors.length > 0) {
+      setSaveError(selectionErrors[0]);
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     try {
@@ -319,6 +415,9 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
         .filter((r) => r.partA > 0 || r.partBC > 0);
       const result = await saveIatGeneratedBank(token, {
         sourceQuestionBankId: preview.sourceBankId,
+        academicYear: preview.academicYear || academicYear,
+        department: preview.department || department,
+        subjectCode: preview.subjectCode || subjectCode,
         requestedPartA: safeCount(preview.requestedPartA),
         requestedPartBC: safeCount(preview.requestedPartBC),
         examType,
@@ -365,7 +464,7 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
         </span>
       </div>
       <div className="overflow-x-auto rounded-2xl border border-[#E5E7EB]">
-        <table className="w-full min-w-[860px] text-left">
+        <table className="w-full min-w-[760px] text-left">
           <thead className="bg-[#F7F8FA] text-[10px] font-extrabold uppercase tracking-wider text-[#94A3B8]">
             <tr>
               <th className="px-3 py-2.5">#</th>
@@ -376,7 +475,6 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
               <th className="px-3 py-2.5">BTL</th>
               <th className="px-3 py-2.5">CO</th>
               <th className="px-3 py-2.5">PI</th>
-              <th className="px-3 py-2.5">Source Q</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-[#F1F5F9] text-xs text-[#111827]">
@@ -402,12 +500,11 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
                 <td className="px-3 py-2.5 font-mono text-[11px] font-bold">{q.btl || q.bloomsLevel || '—'}</td>
                 <td className="px-3 py-2.5 font-mono text-[11px] font-bold">{q.co || '—'}</td>
                 <td className="px-3 py-2.5 font-mono text-[11px] font-bold">{q.pi || '—'}</td>
-                <td className="px-3 py-2.5 font-mono text-[10px] text-[#94A3B8]">{q.sourceQuestionNumber}</td>
               </tr>
             ))}
             {questions.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-3 py-6 text-center text-xs text-[#94A3B8]">No questions selected.</td>
+                <td colSpan={8} className="px-3 py-6 text-center text-xs text-[#94A3B8]">No questions selected.</td>
               </tr>
             )}
           </tbody>
@@ -519,7 +616,7 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
       <div className="rounded-3xl border border-[#E5E7EB] bg-white p-6 sm:p-8 shadow-xs space-y-6">
         <div>
           <span className="text-xs font-extrabold uppercase tracking-wider text-[#94A3B8]">Steps 1 – 4</span>
-          <h2 className="mt-1 text-xl font-extrabold text-[#111827]">Select the source question bank</h2>
+          <h2 className="mt-1 text-xl font-extrabold text-[#111827]">Select the original question bank</h2>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -582,9 +679,9 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
               disabled={!department}
               className={selectClass}
             >
-              <option value="">All subjects…</option>
+              <option value="">Select subject…</option>
               {subjectOptions.map((s) => (
-                <option key={s.subject_code} value={s.subject_code}>
+                <option key={`${s.departments?.department_code || ''}|${s.subject_code}`} value={s.subject_code}>
                   {s.subject_code} — {s.subject_name}
                 </option>
               ))}
@@ -614,11 +711,17 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
           <select
             value={sourceBankId}
             onChange={(e) => { setSourceBankId(e.target.value); resetFromBankChange(); }}
-            disabled={!department || banksLoading}
+            disabled={!subjectCode || banksLoading}
             className={selectClass}
           >
             <option value="">
-              {banksLoading ? 'Loading question banks…' : 'Select the original question bank…'}
+              {!subjectCode
+                ? 'Select a subject first…'
+                : banksLoading
+                  ? 'Loading question banks…'
+                  : sourceBanks.length === 0
+                    ? 'No question bank found for this subject'
+                    : 'Select the original question bank…'}
             </option>
             {sourceBanks.map((b) => (
               <option key={b.id} value={b.id}>
@@ -631,6 +734,55 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
             Only original, uploaded question banks are listed. A generated IAT bank can never be used as a source.
           </span>
         </label>
+
+        {/* ---- Currently selected identity, shown BEFORE any generation ---- */}
+        <div
+          className={`rounded-2xl border p-4 ${
+            selectionErrors.length === 0
+              ? 'border-emerald-200 bg-emerald-50/70'
+              : 'border-amber-200 bg-amber-50/70'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {selectionErrors.length === 0
+              ? <CheckCircle2 className="h-4 w-4 text-emerald-700" />
+              : <AlertCircle className="h-4 w-4 text-amber-700" />}
+            <span className={`text-[11px] font-extrabold uppercase tracking-wider ${accentText}`}>
+              Currently Selected
+            </span>
+          </div>
+          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {([
+              ['Academic Year', academicYear || 'Not selected'],
+              ['Department', department || 'Not selected'],
+              ['Subject Code', subjectCode || 'Not selected'],
+              ['Subject Name', selectedSubjectRecord?.subject_name || 'Not selected']
+            ] as Array<[string, string]>).map(([label, value]) => (
+              <div key={label} className="rounded-xl bg-white px-3 py-2.5 border border-black/5">
+                <div className="text-[9px] font-extrabold uppercase tracking-wider text-[#94A3B8]">{label}</div>
+                <div className="mt-0.5 text-xs font-extrabold text-[#111827] break-words">{value}</div>
+              </div>
+            ))}
+          </div>
+
+          {selectionErrors.length > 0 ? (
+            <ul className="mt-3 space-y-1">
+              {selectionErrors.map((msg, i) => (
+                <li key={i} className="flex items-start gap-1.5 text-[10px] font-bold text-amber-800">
+                  <AlertCircle className="mt-px h-3 w-3 shrink-0" />
+                  <span>{msg}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-3 text-[10px] text-emerald-800">
+              Questions will be taken ONLY from{' '}
+              <strong>{academicYear} / {department} / {subjectCode}</strong>
+              {selectedSourceBank ? ` — ${selectedSourceBank.file_name}` : ''}. No other academic year,
+              department, subject or question bank is used.
+            </p>
+          )}
+        </div>
       </div>
 
       {/* Step 5: Unit-wise question count grid */}
@@ -657,6 +809,19 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
 
           {stats && !statsLoading && (
             <>
+              {/* Exactly which question bank the counts below belong to */}
+              <div className="rounded-2xl border border-[#E5E7EB] bg-[#F7F8FA] p-4">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[#64748B]">
+                  <span className="font-extrabold uppercase tracking-wider text-[#94A3B8]">Original Question Bank</span>
+                  <span className="font-extrabold text-[#111827]">{stats.academicYear} / {stats.department} / {stats.subjectCode}</span>
+                  <span className="font-semibold">— {stats.subjectName || ''}</span>
+                  <span className="font-mono text-[10px] text-[#94A3B8]">{stats.fileName}</span>
+                </div>
+                <p className="mt-1.5 text-[10px] text-[#64748B]">
+                  Every count on this page, and every question selected below, comes from this one question bank only.
+                </p>
+              </div>
+
               {/* Overall stats summary */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {[
@@ -917,7 +1082,7 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
               <span className={`text-xs font-extrabold uppercase tracking-wider ${accentText}`}>
                 Preview — not saved yet
               </span>
-              <h2 className="mt-1 text-xl font-extrabold text-[#111827]">Generated IAT Question Bank</h2>
+              <h2 className="mt-1 text-xl font-extrabold text-[#111827]">Generated Question Bank — Preview</h2>
             </div>
             <button
               onClick={() => setPreviewExpanded((v) => !v)}
@@ -936,8 +1101,8 @@ export const IatQuestionBankGeneratorView: React.FC = () => {
                   {[
                     ['Academic Year', preview.academicYear || '—'],
                     ['Department', preview.department || '—'],
-                    ['Subject', `${preview.subjectCode} – ${preview.subjectName}`],
-                    ['Source Question Bank', preview.sourceBankName]
+                    ['Subject Code', preview.subjectCode || '—'],
+                    ['Subject Name', preview.subjectName || '—']
                   ].map(([k, v]) => (
                     <div key={k} className="flex justify-between gap-4 border-b border-[#F1F5F9] pb-1.5">
                       <dt className="font-bold text-[#94A3B8]">{k}</dt>

@@ -12,6 +12,9 @@
     "server": "tsx watch server/index.ts",
     "dev:server": "tsx watch server/index.ts",
     "test": "tsx server/scripts/testSetLimits.ts",
+    "test:question-bank": "tsx server/scripts/testQuestionBankHeader.ts",
+    "test:question-bank-count": "tsx server/scripts/testQuestionBankCount.ts",
+    "test:audit-log-roles": "tsx server/scripts/testAuditLogRoleSeparation.ts",
     "test:e2e": "tsx server/scripts/testE2E.ts"
   },
   "dependencies": {

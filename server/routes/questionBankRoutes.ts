@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
+import { requireAuth, AuthenticatedRequest } from '../middleware/authMiddleware';
 import { extractQuestionsWithGemini, mapToOcrFormat } from '../services/geminiQuestionBankService';
 import {
   isSupabaseConfigured,
@@ -12,7 +13,8 @@ import {
   updateQuestionBankStatus,
   verifySupabaseTables,
   getQuestionBankCount,
-  getQuestionBanks
+  getQuestionBanks,
+  getQuestionsForBank
 } from '../services/supabaseQuestionBankService';
 import {
   authenticateGemini,
@@ -89,7 +91,7 @@ router.get('/health', async (req: Request, res: Response) => {
  * GET /api/question-banks/count
  * Returns total count of question banks stored in Supabase
  */
-router.get('/question-banks/count', async (_req: Request, res: Response) => {
+router.get('/question-banks/count', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
   try {
     const count = await getQuestionBankCount();
     res.json({ count });
@@ -100,16 +102,30 @@ router.get('/question-banks/count', async (_req: Request, res: Response) => {
 
 /**
  * GET /api/question-banks
- * Returns question banks with optional academicYear, department, subjectCode filters
+ * Returns ORIGINAL question banks with their REAL question counts.
+ *
+ * A subject is identified only by Academic Year + Department + Subject Code.
+ * A subject code that exists under several departments therefore returns one
+ * bank per department, and each bank is counted from its own `questions` rows.
+ *
+ * Query: /api/question-banks?academicYear=2024-2028&department=CIVIL&subjectCode=24CE501
+ *   -> { success: true, questionBanks: [{ ..., total_questions: 225 }] }
+ *
+ * `total_questions` is always a number: 0 for an empty bank, the database
+ * count otherwise. It is never null and never hardcoded.
  */
-router.get('/question-banks', async (req: Request, res: Response) => {
+router.get('/question-banks', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { academicYear, department, subjectCode } = req.query as {
       academicYear?: string;
       department?: string;
       subjectCode?: string;
     };
-    const banks = await getQuestionBanks({ academicYear, department, subjectCode });
+    const banks = await getQuestionBanks({
+      academicYear: academicYear && academicYear !== 'all' ? academicYear : undefined,
+      department: department && department !== 'all' ? department : undefined,
+      subjectCode: subjectCode && subjectCode !== 'all' ? subjectCode : undefined
+    });
     res.json({ success: true, questionBanks: banks });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err?.message || 'Failed to fetch question banks' });
@@ -122,6 +138,31 @@ router.get('/question-banks', async (req: Request, res: Response) => {
 function normalizeCode(code: string): string {
   return (code || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
 }
+
+/**
+ * GET /api/question-banks/:id/questions
+ * Questions of ONE question bank, straight from the database.
+ *
+ * This is what "View Questions" uses, so the explorer shows the real questions
+ * of the selected Academic Year + Department + Subject Code bank instead of the
+ * browser's cached list (which is empty on a fresh production session).
+ */
+router.get('/question-banks/:id/questions', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id: bankId } = req.params;
+    if (!bankId) {
+      return res.status(400).json({ success: false, error: 'Question bank id is required.' });
+    }
+    if (!isSupabaseConfigured()) {
+      return res.json({ success: true, questions: [], databaseConfigured: false });
+    }
+    const questions = await getQuestionsForBank(bankId);
+    return res.json({ success: true, questions, databaseConfigured: true });
+  } catch (err: any) {
+    console.error('[question-banks] GET :id/questions:', err?.message || err);
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to load questions.' });
+  }
+});
 
 /**
  * POST /api/question-banks/extract
@@ -140,8 +181,9 @@ function normalizeCode(code: string): string {
  */
 router.post(
   '/question-banks/extract',
+  requireAuth,
   upload.single('file'),
-  async (req: Request, res: Response, _next: NextFunction) => {
+  async (req: AuthenticatedRequest, res: Response, _next: NextFunction) => {
     try {
       if (!req.file) {
         return res.status(400).json({ error: 'No file uploaded. Include a PDF as "file" in FormData.' });
@@ -363,7 +405,7 @@ router.post(
  *
  * Body: { subjectCode: string, questions: OcrExtractedQuestion[] }
  */
-router.post('/question-banks/:id/approve', async (req: Request, res: Response) => {
+router.post('/question-banks/:id/approve', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id: bankId } = req.params;
     const { subjectCode, questions } = req.body;

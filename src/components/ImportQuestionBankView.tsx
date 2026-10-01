@@ -64,7 +64,8 @@ export const ImportQuestionBankView: React.FC = () => {
     addQuestions,
     currentUser,
     setActiveTab,
-    showToast
+    showToast,
+    authToken
   } = useApp();
 
   // Academic Year selection — use the first active DB year as default
@@ -297,7 +298,8 @@ export const ImportQuestionBankView: React.FC = () => {
           });
         },
         selectedAcademicYear,
-        selectedDepartment
+        selectedDepartment,
+        authToken || undefined
       );
 
       // Selected UI values are the source of truth for the curriculum
@@ -670,7 +672,8 @@ export const ImportQuestionBankView: React.FC = () => {
         const saveResult = await approveQuestionBank(
           currentBankId,
           currentSubject.code,
-          approvedToCommit
+          approvedToCommit,
+          authToken || undefined
         );
         if (saveResult.success) {
           console.log(`[QuestionBank] Saved ${saveResult.savedCount} questions to Supabase.`);

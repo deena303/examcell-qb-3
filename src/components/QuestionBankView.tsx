@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Database,
   Plus,
@@ -26,24 +26,24 @@ import {
 import { useApp } from '../context/AppContext';
 import { AddQuestionModal } from './AddQuestionModal';
 import { AddQuestionBankModal } from './AddQuestionBankModal';
+import {
+  fetchQuestionBanks,
+  fetchQuestionsForBank,
+  mapDbQuestion,
+  QuestionBankListRow
+} from '../services/questionBankApi';
 import { Question, QuestionPart } from '../types';
+import { INITIAL_QUESTIONS } from '../data/initialData';
 
-interface QuestionBankItem {
-  id: string;
-  subject_code: string;
-  subject_name?: string;
-  file_name: string;
-  file_size_bytes?: number;
-  total_pages?: number;
-  total_units?: number;
-  regulation?: string;
-  storage_path?: string;
-  uploaded_by?: string;
-  status: string;
-  academic_year?: string;
-  department?: string;
-  created_at: string;
-}
+/**
+ * Ids of the bundled offline demo fixtures.
+ *
+ * These are placeholder rows used only so the UI is not empty before a database
+ * is reachable. They are NEVER real question-bank data, so they are excluded
+ * from the database-backed Questions Explorer — otherwise a fresh production
+ * session would show invented questions next to the real ones.
+ */
+const DEMO_QUESTION_IDS = new Set(INITIAL_QUESTIONS.map((q) => q.id));
 
 export const QuestionBankView: React.FC = () => {
   const {
@@ -58,7 +58,8 @@ export const QuestionBankView: React.FC = () => {
     setSelectedSubjectCode,
     deleteQuestion,
     currentUser,
-    setActiveTab
+    setActiveTab,
+    authToken
   } = useApp();
 
   const dbSubjectsMapped = useMemo(() => {
@@ -71,12 +72,12 @@ export const QuestionBankView: React.FC = () => {
         department: s.departments?.department_code || departmentsList.find(d => d.id === s.department_id)?.department_code || '',
         semester: s.semester || '',
         regulation: s.regulation || 'Regulation 2024',
-        totalQuestions: questions.filter(q => q.subjectCode === s.subject_code).length,
+        totalQuestions: 0,
         status: 'Active' as const,
         academicYear: s.academic_years?.year_label || academicYearsList.find(y => y.id === s.academic_year_id)?.year_label || '',
         units: []
       }));
-  }, [dbSubjects, departmentsList, academicYearsList, questions]);
+  }, [dbSubjects, departmentsList, academicYearsList]);
 
   const subjectPool = dbSubjectsMapped.length > 0 ? dbSubjectsMapped : subjects;
 
@@ -86,23 +87,67 @@ export const QuestionBankView: React.FC = () => {
   const [filterSubjectCode, setFilterSubjectCode] = useState<string>('all');
 
   // Question Banks from Supabase backend
-  const [questionBanks, setQuestionBanks] = useState<QuestionBankItem[]>([]);
+  const [questionBanks, setQuestionBanks] = useState<QuestionBankListRow[]>([]);
   const [loadingBanks, setLoadingBanks] = useState<boolean>(true);
+  const [banksError, setBanksError] = useState<string | null>(null);
   const [selectedBankId, setSelectedBankId] = useState<string | null>(null);
 
-  // Fetch question banks from backend
+  // Questions of the selected bank, loaded from the database (not from the
+  // browser cache) so a fresh production session shows the real questions.
+  const [bankQuestions, setBankQuestions] = useState<Question[]>([]);
+  const [loadingQuestions, setLoadingQuestions] = useState<boolean>(false);
+  const [questionsError, setQuestionsError] = useState<string | null>(null);
+
+  /**
+   * Local, in-session overrides layered on top of the database rows.
+   *
+   * The database is the source of truth for the question list, but the existing
+   * single-question Add / Edit / Delete actions are local (they update the
+   * in-memory store only). These overrides keep those actions working on top of
+   * the database-backed list without ever mixing in another bank.
+   */
+  const [localQuestionOverrides, setLocalQuestionOverrides] = useState<
+    Record<string, { deleted?: boolean; patch?: Partial<Question> }>
+  >({});
+
+  /** Replaces a question's row in the DB-backed list. */
+  const patchDisplayedQuestion = useCallback((id: string, patch: Partial<Question>) => {
+    setLocalQuestionOverrides((prev) => ({ ...prev, [id]: { ...prev[id], patch } }));
+  }, []);
+
+  /** Hides a question row after a delete. */
+  const hideDisplayedQuestion = useCallback((id: string) => {
+    setLocalQuestionOverrides((prev) => ({ ...prev, [id]: { ...prev[id], deleted: true } }));
+  }, []);
+
+  /**
+   * Fetches ORIGINAL question banks. The Academic Year + Department + Subject
+   * Code selection is sent to the server, which applies it authoritatively, so
+   * the listing can never mix another year / department / subject.
+   */
   useEffect(() => {
+    if (!authToken) {
+      setQuestionBanks([]);
+      setLoadingBanks(false);
+      return;
+    }
     let isMounted = true;
     setLoadingBanks(true);
-    fetch('/api/question-banks')
-      .then(res => res.ok && res.headers.get('content-type')?.includes('application/json') ? res.json() : null)
-      .then(data => {
-        if (isMounted && data && Array.isArray(data.questionBanks)) {
-          setQuestionBanks(data.questionBanks);
-        }
+    setBanksError(null);
+    fetchQuestionBanks(authToken, {
+      academicYear: filterAcademicYear,
+      department: filterDepartment,
+      subjectCode: filterSubjectCode
+    })
+      .then(rows => {
+        if (!isMounted) return;
+        setQuestionBanks(rows);
+        setSelectedBankId(prev => (prev && rows.some(b => b.id === prev) ? prev : null));
       })
       .catch(err => {
-        console.warn('Failed to fetch question banks list:', err);
+        if (!isMounted) return;
+        setQuestionBanks([]);
+        setBanksError(err?.message || 'Failed to load question banks.');
       })
       .finally(() => {
         if (isMounted) setLoadingBanks(false);
@@ -110,7 +155,7 @@ export const QuestionBankView: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [authToken, filterAcademicYear, filterDepartment, filterSubjectCode]);
 
   // Questions Explorer state
   const [activeTab, setLocalActiveTab] = useState<'Overview' | 'Part A' | 'Part B' | 'Part C' | 'Usage History'>('Overview');
@@ -124,7 +169,7 @@ export const QuestionBankView: React.FC = () => {
   const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
   const [viewQuestionModal, setViewQuestionModal] = useState<Question | null>(null);
 
-  // Filtered subjects for the top dropdown
+  // Filtered subjects for the top dropdown — scoped to the selected year/dept.
   const availableSubjects = useMemo(() => {
     return subjectPool.filter(s => {
       if (filterDepartment !== 'all' && s.department !== filterDepartment) return false;
@@ -133,58 +178,117 @@ export const QuestionBankView: React.FC = () => {
     });
   }, [subjectPool, filterDepartment, filterAcademicYear]);
 
-  // Sync currentSubject with selectedSubjectCode
-  const currentSubject = availableSubjects.find(s => s.code === selectedSubjectCode) || subjectPool.find(s => s.code === selectedSubjectCode) || availableSubjects[0] || subjectPool[0];
+  // The subject record that matches the FULL Academic Year + Department + Code
+  // identity. A subject code alone is never enough to identify a subject.
+  const selectedSubjectRecord = useMemo(() => {
+    if (filterSubjectCode === 'all') return undefined;
+    return dbSubjects.find(
+      s =>
+        s.subject_code === filterSubjectCode &&
+        (filterDepartment === 'all' || (s.departments?.department_code || departmentsList.find(d => d.id === s.department_id)?.department_code) === filterDepartment) &&
+        (filterAcademicYear === 'all' || (s.academic_years?.year_label || academicYearsList.find(y => y.id === s.academic_year_id)?.year_label) === filterAcademicYear)
+    );
+  }, [dbSubjects, filterSubjectCode, filterDepartment, filterAcademicYear, departmentsList, academicYearsList]);
 
-  // Synthesize or filter Question Banks
-  const filteredQuestionBanks = useMemo(() => {
-    // If backend has banks, filter them
-    if (questionBanks.length > 0) {
-      return questionBanks.filter(b => {
-        if (filterAcademicYear !== 'all' && b.academic_year && b.academic_year !== filterAcademicYear) return false;
-        if (filterDepartment !== 'all' && b.department && b.department !== filterDepartment) return false;
-        if (filterSubjectCode !== 'all' && b.subject_code !== filterSubjectCode) return false;
-        return true;
-      });
+  const currentSubject = selectedSubjectRecord
+    ? {
+        id: selectedSubjectRecord.id,
+        code: selectedSubjectRecord.subject_code,
+        name: selectedSubjectRecord.subject_name,
+        department: filterDepartment,
+        academicYear: filterAcademicYear
+      }
+    : (() => {
+        const fallback = availableSubjects.find(s => s.code === selectedSubjectCode) || subjectPool[0];
+        return fallback;
+      })();
+
+  // The bank currently being inspected.
+  const selectedBank = useMemo(
+    () => questionBanks.find(b => b.id === selectedBankId) ?? null,
+    [questionBanks, selectedBankId]
+  );
+
+  const visibleBanks = useMemo(
+    () => (selectedBank ? questionBanks.filter(b => b.id === selectedBank.id) : questionBanks),
+    [questionBanks, selectedBank]
+  );
+
+  // Load the questions of the selected bank.
+  useEffect(() => {
+    if (!authToken || !selectedBankId) {
+      setBankQuestions([]);
+      setQuestionsError(null);
+      return;
     }
+    let cancelled = false;
+    setLoadingQuestions(true);
+    setQuestionsError(null);
+    fetchQuestionsForBank(authToken, selectedBankId)
+      .then(rows => {
+        if (cancelled) return;
+        setBankQuestions(rows.map(mapDbQuestion));
+      })
+      .catch(err => {
+        if (cancelled) return;
+        setBankQuestions([]);
+        setQuestionsError(err?.message || 'Failed to load the questions of this question bank.');
+      })
+      .finally(() => !cancelled && setLoadingQuestions(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken, selectedBankId]);
 
-    // Fallback: Synthesize from active curriculum subjects
-    const synList: QuestionBankItem[] = subjectPool.map(s => {
-      const qCount = questions.filter(q => q.subjectCode === s.code).length;
-      return {
-        id: `qb-${s.code}`,
-        subject_code: s.code,
-        subject_name: s.name,
-        file_name: `${s.code}_QuestionBank.pdf`,
-        file_size_bytes: 2400000,
-        total_pages: 12,
-        total_units: 5,
-        regulation: s.regulation,
-        status: 'approved',
-        academic_year: s.academicYear || '2024-2025',
-        department: s.department,
-        created_at: new Date().toISOString()
-      };
-    });
+  // Drop in-session overrides whenever a different bank is opened.
+  useEffect(() => {
+    setLocalQuestionOverrides({});
+  }, [selectedBankId]);
 
-    return synList.filter(b => {
-      if (filterAcademicYear !== 'all' && b.academic_year !== filterAcademicYear) return false;
-      if (filterDepartment !== 'all' && b.department !== filterDepartment) return false;
-      if (filterSubjectCode !== 'all' && b.subject_code !== filterSubjectCode) return false;
+  /**
+   * Questions shown in the explorer.
+   *
+   * The database rows of the selected bank are authoritative. Locally added
+   * questions (not yet in the database) are appended, and local edits/deletes
+   * are layered on top — all still restricted to the selected Academic Year +
+   * Department + Subject Code + question bank.
+   */
+  const subjectQuestions = useMemo(() => {
+    const scopeCode = selectedBank
+      ? selectedBank.subject_code
+      : (currentSubject?.code || '');
+
+    // Locally added questions that are not in the database yet, matched to the
+    // same subject / department / academic year scope.
+    const knownIds = new Set(bankQuestions.map((q) => q.id));
+    const localAdditions = questions.filter((q) => {
+      if (knownIds.has(q.id)) return false;
+      if (DEMO_QUESTION_IDS.has(q.id)) return false;  // offline placeholder data
+      if (q.questionBankId) return false;             // belongs to a different bank
+      if (!scopeCode || q.subjectCode !== scopeCode) return false;
+      if (q.department && filterDepartment !== 'all' && q.department !== filterDepartment) return false;
+      if (q.academicYear && filterAcademicYear !== 'all' && q.academicYear !== filterAcademicYear) return false;
       return true;
     });
-  }, [questionBanks, subjectPool, questions, filterAcademicYear, filterDepartment, filterSubjectCode]);
 
-  // Questions for the currently inspected subject
-  const subjectQuestions = useMemo(() => {
-    return questions.filter(q => {
-      if (selectedBankId) {
-        // If a specific bank was selected and has questionBankId, filter by it
-        if (q.questionBankId && q.questionBankId === selectedBankId) return true;
-      }
-      return q.subjectCode === currentSubject.code;
-    });
-  }, [questions, currentSubject.code, selectedBankId]);
+    const base = selectedBankId ? bankQuestions : localAdditions;
+
+    return base
+      .filter((q) => !localQuestionOverrides[q.id]?.deleted)
+      .map((q) => {
+        const patch = localQuestionOverrides[q.id]?.patch;
+        return patch ? { ...q, ...patch } : q;
+      });
+  }, [
+    bankQuestions,
+    questions,
+    currentSubject,
+    selectedBank,
+    selectedBankId,
+    filterDepartment,
+    filterAcademicYear,
+    localQuestionOverrides
+  ]);
 
   // Filter by Tab
   const tabFiltered = useMemo(() => {
@@ -225,14 +329,32 @@ export const QuestionBankView: React.FC = () => {
     setModalOpen(true);
   };
 
+  /**
+   * Applies an edit made in the Add/Edit modal.
+   * The modal writes to the in-memory store, so the DB-backed row is patched
+   * here so the explorer reflects the change until the bank is reloaded.
+   */
+  const handleEditSaved = (questionId: string, patch: Partial<Question>) => {
+    patchDisplayedQuestion(questionId, patch);
+  };
+
   const handleAdd = () => {
     setEditingQuestion(null);
     setModalOpen(true);
   };
 
-  const handleDrillIntoBank = (bank: QuestionBankItem) => {
-    setSelectedSubjectCode(bank.subject_code);
+  /** Removes a question row and drops it from the in-memory store. */
+  const markQuestionDeleted = (question: Question) => {
+    deleteQuestion(question.id);
+    hideDisplayedQuestion(question.id);
+    if (viewQuestionModal?.id === question.id) setViewQuestionModal(null);
+  };
+
+  const handleDrillIntoBank = (bank: QuestionBankListRow) => {
     setSelectedBankId(bank.id);
+    setSelectedSubjectCode(bank.subject_code);
+    setFilterSubjectCode(bank.subject_code);
+    setLocalActiveTab('Overview');
     const explorerEl = document.getElementById('questions-explorer-section');
     if (explorerEl) {
       explorerEl.scrollIntoView({ behavior: 'smooth' });
@@ -360,9 +482,9 @@ export const QuestionBankView: React.FC = () => {
         </div>
 
         {/* Dynamic count display */}
-        <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
+        <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
           <p className="font-bold text-slate-700">
-            Showing <span className="text-[#D71945] font-black">{filteredQuestionBanks.length}</span> Question {filteredQuestionBanks.length === 1 ? 'Bank' : 'Banks'} for{' '}
+            Showing <span className="text-[#D71945] font-black">{visibleBanks.length}</span> Question {visibleBanks.length === 1 ? 'Bank' : 'Banks'} for{' '}
             <span className="font-extrabold text-slate-900">{filterAcademicYear === 'all' ? 'All Years' : filterAcademicYear}</span>
             {' / '}
             <span className="font-extrabold text-slate-900">{filterDepartment === 'all' ? 'All Departments' : filterDepartment}</span>
@@ -370,7 +492,7 @@ export const QuestionBankView: React.FC = () => {
             <span className="font-extrabold text-slate-900">
               {filterSubjectCode === 'all'
                 ? 'All Subjects'
-                : (subjects.find(s => s.code === filterSubjectCode)?.name || filterSubjectCode)}
+                : `${filterSubjectCode} – ${selectedSubjectRecord?.subject_name || filterSubjectCode}`}
             </span>
           </p>
 
@@ -380,6 +502,12 @@ export const QuestionBankView: React.FC = () => {
             </span>
           )}
         </div>
+
+        {banksError && (
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-3 text-[11px] font-semibold text-red-800">
+            {banksError}
+          </div>
+        )}
       </div>
 
       {/* QUESTION BANKS LIST LAYER */}
@@ -396,7 +524,7 @@ export const QuestionBankView: React.FC = () => {
           </span>
         </div>
 
-        {filteredQuestionBanks.length === 0 ? (
+        {visibleBanks.length === 0 ? (
           <div className="p-12 text-center">
             <Database className="h-10 w-10 text-slate-300 mx-auto mb-3" />
             <p className="text-sm font-bold text-slate-700">No Question Banks found</p>
@@ -428,9 +556,16 @@ export const QuestionBankView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#E5E7EB]">
-                {filteredQuestionBanks.map(bank => {
-                  const isSelected = bank.subject_code === currentSubject.code;
-                  const bankQuestionsCount = questions.filter(q => q.subjectCode === bank.subject_code).length;
+                {visibleBanks.map(bank => {
+                  const isSelected = bank.id === selectedBankId;
+                  // Real count from the database. Never hardcoded, never taken
+                  // from browser state — a missing value renders as 0, not blank.
+                  const bankQuestionsCount = Number.isFinite(bank.total_questions)
+                    ? Math.max(0, Math.trunc(bank.total_questions))
+                    : 0;
+                  const bankUnits = Number.isFinite(bank.total_units as number)
+                    ? Math.max(0, Math.trunc(bank.total_units as number))
+                    : 0;
 
                   return (
                     <tr
@@ -443,11 +578,11 @@ export const QuestionBankView: React.FC = () => {
                       </td>
                       <td className="py-3.5 px-3">
                         <span className="inline-flex rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-700">
-                          {bank.academic_year || '2024-2025'}
+                          {bank.academic_year || '—'}
                         </span>
                       </td>
                       <td className="py-3.5 px-3 font-semibold text-slate-800">
-                        {bank.department || currentSubject.department}
+                        {bank.department || '—'}
                       </td>
                       <td className="py-3.5 px-3 text-slate-600 font-mono text-[11px]">
                         <div className="flex items-center gap-1.5 line-clamp-1">
@@ -456,7 +591,7 @@ export const QuestionBankView: React.FC = () => {
                         </div>
                       </td>
                       <td className="py-3.5 px-3 text-center font-bold text-slate-700">
-                        {bank.total_units || 5}
+                        {bankUnits}
                       </td>
                       <td className="py-3.5 px-3 text-center">
                         <span className="inline-flex rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-black text-[#1976D2]">
@@ -464,15 +599,23 @@ export const QuestionBankView: React.FC = () => {
                         </span>
                       </td>
                       <td className="py-3.5 px-3 text-slate-500 text-[11px]">
-                        {new Date(bank.created_at).toLocaleDateString('en-GB', {
-                          day: '2-digit',
-                          month: 'short',
-                          year: 'numeric'
-                        })}
+                        {bank.created_at
+                          ? new Date(bank.created_at).toLocaleDateString('en-GB', {
+                              day: '2-digit',
+                              month: 'short',
+                              year: 'numeric'
+                            })
+                          : '—'}
                       </td>
                       <td className="py-3.5 px-3">
-                        <span className="inline-flex items-center rounded-md bg-emerald-100 px-2 py-0.5 text-[10px] font-extrabold uppercase text-emerald-800">
-                          Active
+                        <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-extrabold uppercase ${
+                          bank.status === 'rejected'
+                            ? 'bg-red-100 text-red-800'
+                            : bank.status === 'pending_review'
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-emerald-100 text-emerald-800'
+                        }`}>
+                          {bank.status === 'pending_review' ? 'Pending Review' : bank.status === 'rejected' ? 'Rejected' : 'Active'}
                         </span>
                       </td>
                       <td className="py-3.5 px-4 text-right">
@@ -508,33 +651,62 @@ export const QuestionBankView: React.FC = () => {
                   Questions Explorer
                 </span>
                 <span className="rounded-md bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-800">
-                  {currentSubject.code}
+                  {currentSubject?.code || '—'}
                 </span>
               </div>
               <h2 className="text-xl font-black text-slate-900">
-                {currentSubject.name}
+                {selectedBank
+                  ? `${selectedBank.subject_code} – ${selectedBank.subject_name || 'Subject'}`
+                  : (currentSubject?.name || 'Select a question bank to view its questions')}
               </h2>
+              {/* The exact subject identity in use: Year + Department + Code */}
+              <p className="mt-1 text-[11px] text-[#64748B]">
+                <span className="font-bold text-slate-700">Currently viewing:</span>{' '}
+                {selectedBank
+                  ? `${selectedBank.academic_year || '—'} / ${selectedBank.department || '—'} / ${selectedBank.subject_code}`
+                  : `${filterAcademicYear === 'all' ? 'All Years' : filterAcademicYear} / ${filterDepartment === 'all' ? 'All Departments' : filterDepartment} / ${filterSubjectCode === 'all' ? 'All Subjects' : filterSubjectCode}`}
+              </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-slate-500">Switch Subject:</span>
-            <select
-              value={currentSubject.code}
-              onChange={(e) => {
-                setSelectedSubjectCode(e.target.value);
-                setSelectedBankId(null);
-              }}
-              className="rounded-xl border border-[#E5E7EB] bg-white px-3 py-2 text-xs font-bold text-[#111827] shadow-xs focus:border-[#D71945] focus:outline-hidden"
-            >
-              {subjects.map((sub) => (
-                <option key={sub.id} value={sub.code}>
-                  {sub.code} – {sub.name}
-                </option>
-              ))}
-            </select>
+            {selectedBank ? (
+              <button
+                type="button"
+                onClick={() => setSelectedBankId(null)}
+                className="rounded-xl border border-[#E5E7EB] bg-white px-3.5 py-2 text-xs font-bold text-[#64748B] shadow-xs hover:border-slate-400 hover:text-[#111827] cursor-pointer"
+              >
+                Back to all banks
+              </button>
+            ) : (
+              <>
+                <span className="text-xs font-bold text-slate-500">Switch Subject:</span>
+                <select
+                  value={filterSubjectCode === 'all' ? '' : filterSubjectCode}
+                  onChange={(e) => {
+                    setFilterSubjectCode(e.target.value || 'all');
+                    setSelectedBankId(null);
+                    if (e.target.value) setSelectedSubjectCode(e.target.value);
+                  }}
+                  className="rounded-xl border border-[#E5E7EB] bg-white px-3 py-2 text-xs font-bold text-[#111827] shadow-xs focus:border-[#D71945] focus:outline-hidden"
+                >
+                  <option value="">Select subject…</option>
+                  {availableSubjects.map((sub) => (
+                    <option key={sub.id} value={sub.code}>
+                      {sub.code} – {sub.name}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
           </div>
         </div>
+
+        {questionsError && (
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-3 text-[11px] font-semibold text-red-800">
+            {questionsError}
+          </div>
+        )}
 
         {/* Statistics Cards for Selected Subject */}
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 sm:gap-4">
@@ -674,10 +846,18 @@ export const QuestionBankView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#E5E7EB]">
-                {filteredQuestions.length === 0 ? (
+                {loadingQuestions ? (
                   <tr>
                     <td colSpan={11} className="py-12 text-center text-slate-500">
-                      No questions found matching the selected filters.
+                      <span className="font-semibold">Loading questions from the database…</span>
+                    </td>
+                  </tr>
+                ) : filteredQuestions.length === 0 ? (
+                  <tr>
+                    <td colSpan={11} className="py-12 text-center text-slate-500">
+                      {selectedBankId
+                        ? 'This question bank has no questions matching the selected filters.'
+                        : 'No questions found matching the selected filters.'}
                     </td>
                   </tr>
                 ) : (
@@ -774,9 +954,10 @@ export const QuestionBankView: React.FC = () => {
                             <button
                               type="button"
                               onClick={() => {
-                                if (window.confirm('Are you sure you want to delete this question?')) {
-                                  deleteQuestion(q.id);
-                                }
+                              if (window.confirm('Are you sure you want to delete this question?')) {
+                                markQuestionDeleted(q);
+                              }
+
                               }}
                               title="Delete Question"
                               className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600 transition-colors cursor-pointer"
@@ -803,7 +984,8 @@ export const QuestionBankView: React.FC = () => {
           setEditingQuestion(null);
         }}
         editQuestion={editingQuestion}
-        defaultSubjectCode={currentSubject.code}
+        onSaved={handleEditSaved}
+        defaultSubjectCode={currentSubject?.code || filterSubjectCode || subjects[0]?.code || ""}
       />
 
       {/* View Question Detail Modal */}
@@ -879,7 +1061,7 @@ export const QuestionBankView: React.FC = () => {
       <AddQuestionBankModal
         isOpen={bankModalOpen}
         onClose={() => setBankModalOpen(false)}
-        defaultSubjectCode={currentSubject.code}
+        defaultSubjectCode={currentSubject?.code || filterSubjectCode || subjects[0]?.code || ""}
       />
     </div>
   );

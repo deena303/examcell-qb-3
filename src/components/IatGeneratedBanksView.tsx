@@ -29,7 +29,7 @@ import {
   deleteIatGeneratedBank,
   SourceBankOption
 } from '../services/iatQuestionBankApi';
-import { exportIatBankPdf, exportIatBankWord } from '../utils/exportUtils';
+import { exportIatBankPdf, exportIatBankWord, resolveQuestionBankSubjectCode } from '../utils/exportUtils';
 
 const statusBadge: Record<string, string> = {
   Active: 'bg-emerald-100 text-emerald-800',
@@ -126,7 +126,6 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ detail, accentBg, accentHov
                 <th className="w-14 px-2 py-2 text-center">BTL</th>
                 <th className="w-14 px-2 py-2 text-center">CO</th>
                 <th className="w-14 px-2 py-2 text-center">PI</th>
-                <th className="w-20 px-2 py-2 text-center">Source</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#F1F5F9] text-xs text-[#111827]">
@@ -138,10 +137,6 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ detail, accentBg, accentHov
                   <td className="px-2 py-2.5 text-center font-mono text-[10px] font-bold">{q.btl || q.bloomsLevel || '—'}</td>
                   <td className="px-2 py-2.5 text-center font-mono text-[10px] font-bold">{q.co || '—'}</td>
                   <td className="px-2 py-2.5 text-center font-mono text-[10px] font-bold">{q.pi || '—'}</td>
-                  <td className="px-2 py-2.5 text-center font-mono text-[10px] text-[#94A3B8]"
-                    title={q.sourceQuestionId}>
-                    {q.sourceQuestionNumber || q.sourceQuestionId.slice(0, 6)}
-                  </td>
                 </tr>
               ))}
             </tbody>
@@ -156,14 +151,14 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ detail, accentBg, accentHov
       <div className="w-full max-w-6xl rounded-3xl border border-[#E5E7EB] bg-white shadow-2xl">
         {/* Header */}
         <div className="flex items-start justify-between gap-4 border-b border-[#E5E7EB] p-6 pb-5">
-          <div className="flex-1 min-w-0">
-            <span className="text-[10px] font-extrabold uppercase tracking-widest text-[#D71945]">IAT Generated Question Bank</span>
-            <h3 className="mt-0.5 text-xl font-black text-[#111827] leading-tight">{detail.name}</h3>
-            <p className="mt-1 text-[11px] text-[#64748B]">
-              {detail.subjectCode} · {detail.department || '—'} · {detail.academicYear || '—'} ·
-              Source: <span className="font-semibold text-[#374151]">{detail.sourceBankName || '—'}</span>
-            </p>
-          </div>
+        <div className="flex-1 min-w-0">
+          <span className="text-[10px] font-extrabold uppercase tracking-widest text-[#D71945]">Question Bank</span>
+          <h3 className="mt-0.5 text-xl font-black text-[#111827] leading-tight">{detail.name}</h3>
+          <p className="mt-1 text-[11px] text-[#64748B]">
+            {resolveQuestionBankSubjectCode(detail)} · {detail.department || '—'} · {detail.academicYear || '—'}
+          </p>
+        </div>
+
           <div className="flex items-center gap-2 shrink-0">
             {/* Export dropdown */}
             <div ref={exportRef} className="relative">
@@ -258,13 +253,12 @@ const DetailDrawer: React.FC<DetailDrawerProps> = ({ detail, accentBg, accentHov
             </div>
           </div>
 
-          {/* Source bank safety notice */}
+          {/* Non-destructive guarantee, stated without exposing source references */}
           <div className="flex items-start gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
             <Database className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />
             <p className="text-[10px] leading-relaxed text-emerald-800">
-              Every question is linked to its source. The original bank{' '}
-              <strong>{detail.sourceBankName || detail.sourceQuestionBankId}</strong> still contains all of its
-              questions and was not modified. Export is read-only and never modifies the database.
+              This is a selection only. The full original question bank is stored separately and was not
+              modified. Export is read-only and never modifies the database.
             </p>
           </div>
 
@@ -326,7 +320,8 @@ export const IatGeneratedBanksView: React.FC = () => {
     activeDepartmentsList,
     dbSubjects,
     showToast,
-    setActiveTab
+    setActiveTab,
+    setIatGeneratorPrefill
   } = useApp();
 
   const accent = isSuperAdminPortal ? 'purple' : 'rose';
@@ -399,7 +394,7 @@ export const IatGeneratedBanksView: React.FC = () => {
     loadBanks();
   }, [loadBanks]);
 
-  // Source bank options for the "Source Question Bank" filter
+  // Options for the "Original Question Bank" filter
   useEffect(() => {
     if (!token || !academicYear || !department) {
       setSourceBanks([]);
@@ -592,7 +587,7 @@ export const IatGeneratedBanksView: React.FC = () => {
 
           <label className="block">
             <span className="mb-1.5 block text-[10px] font-extrabold uppercase tracking-wider text-[#94A3B8]">
-              Source Question Bank
+              Original Question Bank
             </span>
             <select
               value={sourceBankId}
@@ -600,7 +595,7 @@ export const IatGeneratedBanksView: React.FC = () => {
               disabled={!sourceBanks.length}
               className={selectClass}
             >
-              <option value="">All source banks</option>
+              <option value="">All original question banks</option>
               {sourceBanks.map((b) => (
                 <option key={b.id} value={b.id}>
                   {b.subject_code} — {b.file_name}
@@ -684,14 +679,13 @@ export const IatGeneratedBanksView: React.FC = () => {
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1100px] text-left">
+            <table className="w-full min-w-[1000px] text-left">
               <thead className="bg-[#F7F8FA] text-[10px] font-extrabold uppercase tracking-wider text-[#94A3B8]">
                 <tr>
                   <th className="px-4 py-3">Academic Year</th>
                   <th className="px-4 py-3">Department</th>
                   <th className="px-4 py-3">Subject Code</th>
                   <th className="px-4 py-3">Subject Name</th>
-                  <th className="px-4 py-3">Source Bank</th>
                   <th className="px-4 py-3 text-center">Part A</th>
                   <th className="px-4 py-3 text-center">Part B</th>
                   <th className="px-4 py-3 text-center">Part C</th>
@@ -707,11 +701,10 @@ export const IatGeneratedBanksView: React.FC = () => {
                   <tr key={b.id} className="hover:bg-[#F9FAFB]">
                     <td className="px-4 py-3 font-bold">{b.academicYear || '—'}</td>
                     <td className="px-4 py-3 font-bold">{b.department || '—'}</td>
-                    <td className="px-4 py-3 font-mono font-bold">{b.subjectCode}</td>
-                    <td className="px-4 py-3">{b.subjectName || '—'}</td>
-                    <td className="max-w-[220px] truncate px-4 py-3 text-[#64748B]" title={b.sourceBankName || ''}>
-                      {b.sourceBankName || '—'}
+                    <td className="px-4 py-3 font-mono font-bold whitespace-nowrap">
+                      {resolveQuestionBankSubjectCode(b)}
                     </td>
+                    <td className="px-4 py-3">{b.subjectName || '—'}</td>
                     <td className="px-4 py-3 text-center font-black">{b.actualPartACount}</td>
                     <td className="px-4 py-3 text-center font-black">{b.actualPartBCount}</td>
                     <td className="px-4 py-3 text-center font-black">{b.actualPartCCount}</td>
@@ -740,13 +733,18 @@ export const IatGeneratedBanksView: React.FC = () => {
                         </button>
                         <button
                           onClick={() => {
-                            setAcademicYear(b.academicYear || '');
-                            setDepartment(b.department || '');
-                            setSubjectCode(b.subjectCode);
-                            setSourceBankId(b.sourceQuestionBankId);
+                            // Hand the complete identity to the generator — its
+                            // selectors are local state, so a tab switch alone
+                            // would land on an empty form.
+                            setIatGeneratorPrefill({
+                              academicYear: b.academicYear || '',
+                              department: b.department || '',
+                              subjectCode: resolveQuestionBankSubjectCode(b),
+                              sourceBankId: b.sourceQuestionBankId
+                            });
                             setActiveTab('iat-question-bank-generator');
                             showToast(
-                              `Loaded the source of "${b.name}". Enter new counts and generate — "${b.name}" will not be overwritten.`
+                              `Loaded the original question bank of "${b.name}". Enter new counts and generate — "${b.name}" will not be overwritten.`
                             );
                           }}
                           disabled={b.status !== 'Active'}
@@ -824,8 +822,7 @@ export const IatGeneratedBanksView: React.FC = () => {
                 <h3 className="text-sm font-black text-[#111827]">Delete this IAT question bank?</h3>
                 <p className="mt-1 text-xs leading-relaxed text-[#64748B]">
                   <strong>{confirmDelete.name}</strong> and its {confirmDelete.totalQuestions} selected questions
-                  will be permanently removed. The source question bank{' '}
-                  <strong>{confirmDelete.sourceBankName || 'original bank'}</strong> will <strong>not</strong> be
+                  will be permanently removed. The original question bank will <strong>not</strong> be
                   deleted or modified.
                 </p>
               </div>

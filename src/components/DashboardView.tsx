@@ -15,7 +15,8 @@ export const DashboardView: React.FC = () => {
     subjects,
     generatedPapers,
     setActiveTab,
-    currentUser
+    currentUser,
+    authToken
   } = useApp();
 
   // Question bank count from backend (Supabase)
@@ -24,7 +25,12 @@ export const DashboardView: React.FC = () => {
 
   useEffect(() => {
     // Fetch real question bank count from backend
-    fetch('/api/question-banks/count')
+    if (!authToken) {
+      setQuestionBankCount(0);
+      setLoadingBanks(false);
+      return;
+    }
+    fetch('/api/question-banks/count', { headers: { Authorization: `Bearer ${authToken}` } })
       .then(res => res.ok && res.headers.get('content-type')?.includes('application/json') ? res.json() : null)
       .then(data => {
         if (data && typeof data.count === 'number') {
@@ -35,7 +41,7 @@ export const DashboardView: React.FC = () => {
       })
       .catch(() => setQuestionBankCount(0))
       .finally(() => setLoadingBanks(false));
-  }, []);
+  }, [authToken]);
 
   const subjectsCount = subjects.length;
   const papersCount = generatedPapers.length;

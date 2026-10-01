@@ -81,6 +81,17 @@ interface AppContextType {
   // ---- Auth token (for Super Admin API calls) ----
   authToken: string | null;
 
+  // ---- IAT Question Bank Generator handoff ----
+  /**
+   * Selection handed to the IAT Question Bank Generator by another screen
+   * (e.g. "Regenerate" on IAT Generated Banks).
+   *
+   * The generator keeps its selectors in local state, so without this a jump
+   * between tabs would land on an empty form. Consumed once, then cleared.
+   */
+  iatGeneratorPrefill: IatGeneratorPrefill | null;
+  setIatGeneratorPrefill: (prefill: IatGeneratorPrefill | null) => void;
+
   // ---- Subjects (local state — kept for paper gen compat) ----
   subjects: Subject[];
   addSubject: (subject: Omit<Subject, 'id' | 'totalQuestions'>) => void;
@@ -167,6 +178,18 @@ interface AppContextType {
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
+
+/**
+ * A complete subject identity plus the original question bank to reduce.
+ * This is the only way to reach the generator's step 4 — the generator always
+ * requires Academic Year + Department + Subject Code before it will generate.
+ */
+export interface IatGeneratorPrefill {
+  academicYear: string;
+  department: string;
+  subjectCode: string;
+  sourceBankId: string;
+}
 
 const STORAGE_KEYS = {
   SUBJECTS: 'msajce_subjects',
@@ -398,7 +421,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // ============================================================
   // Auth — real backend login
   // ============================================================
+
+  /**
+   * Removes any persisted authentication artefact.
+   *
+   * The session itself is held in memory only, so this is a belt-and-braces
+   * sweep of any legacy key an older build (or a browser extension) may have
+   * written. It runs on every login AND every logout so a Super Admin session
+   * can never be picked up by a later Exam Cell session.
+   */
+  const clearPersistedAuthState = useCallback(() => {
+    // Only keys this application owns (all `msajce_` prefixed) are touched.
+    const legacyAuthKeys = [
+      'msajce_auth_token',
+      'msajce_token',
+      'msajce_session',
+      'msajce_current_user',
+      'msajce_user_role',
+      'msajce_portal',
+      'msajce_auth'
+    ];
+    try {
+      legacyAuthKeys.forEach((k) => {
+        localStorage.removeItem(k);
+        sessionStorage.removeItem(k);
+      });
+    } catch {
+      /* storage unavailable (private mode) — the in-memory session still governs */
+    }
+  }, []);
+
   const login = async (email: string, password: string): Promise<void> => {
+    // Never build a new session on top of a previous one.
+    clearPersistedAuthState();
+    setAuthSession(null);
+    setIsAuthenticated(false);
+    setActiveTab('dashboard');
+    setPreviousTab('dashboard');
     try {
       const result = await loginApi(email, password);
       const session: AuthSession = {
@@ -411,17 +470,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setAuthSession(session);
       setIsAuthenticated(true);
 
-      // Spec §7 — route to the correct portal based on the authenticated role.
-      // The portal itself is derived from userRole; each role lands on its
-      // own home tab. Every privileged action is re-verified server-side.
+      // Role-based routing. The portal is derived from `userRole` alone, so a
+      // SUPER_ADMIN is always identified as Super Admin and always lands in the
+      // Super Admin portal — never in the Exam Cell portal. Every privileged
+      // action is re-verified server-side on each API call.
       switch (result.user.role) {
         case 'SUPER_ADMIN':
+          // Super Admin portal home (Super Admin Overview).
           setActiveTab('dashboard');
           break;
         case 'PRINCIPAL':
           setActiveTab('dashboard');
           break;
         default:
+          // Exam Cell portal home.
           setActiveTab('dashboard');
       }
 
@@ -436,14 +498,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (authSession?.token) {
       logoutApi(authSession.token).catch(() => {});
     }
+    // Complete teardown: no token, no user, no portal, no cached auth artefact.
+    clearPersistedAuthState();
     setAuthSession(null);
     setIsAuthenticated(false);
     setActiveTab('dashboard');
+    setPreviousTab('dashboard');
+    setActivePaper(null);
+    setPaperToReviewId(null);
+    setToastMessage(null);
+    setIatGeneratorPrefill(null);
     showToast('Logged out successfully.');
   };
 
   // Backward-compat stubs
   const navigateToPortal = (_portal: 'examcell' | 'superadmin') => {};
+
+  // ============================================================
+  // IAT Question Bank Generator handoff
+  // ============================================================
+  const [iatGeneratorPrefill, setIatGeneratorPrefill] = useState<IatGeneratorPrefill | null>(null);
 
   // ============================================================
   // Subjects Management (local state)
@@ -1136,6 +1210,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         masterDataLoading,
         refreshMasterData: loadMasterData,
         authToken: authSession?.token ?? null,
+        iatGeneratorPrefill,
+        setIatGeneratorPrefill,
         subjects: effectiveSubjects,
         addSubject,
         updateSubject,

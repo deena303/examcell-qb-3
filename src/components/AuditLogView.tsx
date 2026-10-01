@@ -17,47 +17,83 @@ import { useApp } from '../context/AppContext';
 import { fetchAuditLogs, AuditLog, AuditLogFilters } from '../services/authApi';
 
 export const AuditLogView: React.FC = () => {
-  const { authToken, showToast, isSuperAdminPortal } = useApp();
+  const { authToken, showToast, isSuperAdminPortal, userRole } = useApp();
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Filters state
   const [search, setSearch] = useState('');
-  const [role, setRole] = useState('');
   const [action, setAction] = useState('');
   const [status, setStatus] = useState('');
 
+  /**
+   * The role scope of this screen.
+   *
+   * It is the SIGNED-IN user's own role and is never sent to the API — the
+   * backend derives the same value from the verified JWT and scopes the query
+   * with it. It is displayed here so the user can see what the page covers.
+   */
+  const scopeRole = userRole === 'SUPER_ADMIN' ? 'SUPER_ADMIN' : 'EXAM_CELL';
+
   const loadLogs = useCallback(async (showToastNotice = false) => {
     if (!authToken) {
+      setLogs([]);
       setLoading(false);
       return;
     }
     try {
+      setLoadError(null);
+      // No `role` is sent: the API filters by the caller's own role.
       const filters: AuditLogFilters = {
         search: search.trim() || undefined,
-        role: role || undefined,
         action: action || undefined,
         status: status || undefined,
         limit: 200
       };
       const data = await fetchAuditLogs(filters, authToken);
-      setLogs(data);
+
+      // Defence in depth: the API is already role-scoped, so a row with any
+      // other role is never rendered even if one were ever returned.
+      const scoped = (data as AuditLog[]).filter(
+        (log) => String(log.role || '').trim().toUpperCase() === scopeRole
+      );
+
+      setLogs(scoped);
       if (showToastNotice) {
-        showToast(`Loaded ${data.length} audit logs.`);
+        showToast(`Loaded ${scoped.length} ${scopeRole} audit logs.`);
       }
     } catch (err: any) {
-      console.error('[AuditLogView] Fetch error:', err);
-      showToast('Failed to load audit logs.');
+      setLogs([]);
+      const message = err?.message || 'Failed to load audit logs.';
+      setLoadError(message);
+      showToast(message);
     } finally {
       setLoading(false);
       setIsRefreshing(false);
     }
-  }, [authToken, search, role, action, status, showToast]);
+  }, [authToken, search, action, status, scopeRole, showToast]);
 
   useEffect(() => {
     loadLogs();
   }, [loadLogs]);
+
+  /**
+   * Clear every role-specific cache when the session changes.
+   *
+   * On logout, or when a different role signs in, the previous role's rows are
+   * dropped before the new request is issued, so no audit data (and no role,
+   * user or cached response) survives a session change.
+   */
+  useEffect(() => {
+    setLogs([]);
+    setLoadError(null);
+    setSearch('');
+    setAction('');
+    setStatus('');
+    setIsRefreshing(false);
+  }, [authToken, userRole]);
 
   const handleRefresh = () => {
     setIsRefreshing(true);
@@ -66,7 +102,6 @@ export const AuditLogView: React.FC = () => {
 
   const handleResetFilters = () => {
     setSearch('');
-    setRole('');
     setAction('');
     setStatus('');
   };
@@ -100,7 +135,10 @@ export const AuditLogView: React.FC = () => {
             Audit Logs
           </h1>
           <p className="mt-1 text-xs text-[#64748B]">
-            Comprehensive activity ledger capturing authentication events, configuration changes, and data mutations.
+            Activity ledger for the <strong>{scopeRole}</strong> role only — authentication events,
+            configuration changes and data mutations performed by this role. The filter is applied by
+            the server from your authenticated role, so another role's records are never returned to
+            this page.
           </p>
         </div>
 
@@ -137,18 +175,28 @@ export const AuditLogView: React.FC = () => {
             />
           </div>
 
-          {/* Role Filter */}
+          {/*
+            Role scope — read-only.
+
+            The role is NOT a filter the user can change: this page always shows
+            the signed-in role's own records only, and the backend enforces that.
+          */}
           <div>
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              className="w-full px-3.5 py-2.5 text-xs font-medium bg-[#F7F8FA] border border-[#E5E7EB] rounded-xl text-[#111827] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#D71945]/20 focus:border-[#D71945] transition-all cursor-pointer"
+            <label className="mb-1 block text-[10px] font-extrabold uppercase tracking-wider text-[#94A3B8]">
+              Role Scope
+            </label>
+            <div
+              className={`w-full flex items-center justify-between gap-2 px-3.5 py-2.5 text-xs font-extrabold uppercase tracking-wide rounded-xl border ${
+                scopeRole === 'SUPER_ADMIN'
+                  ? 'bg-purple-50 text-purple-800 border-purple-200'
+                  : 'bg-rose-50 text-rose-800 border-rose-200'
+              }`}
             >
-              <option value="">All Roles</option>
-              <option value="SUPER_ADMIN">SUPER_ADMIN</option>
-              <option value="EXAM_CELL">EXAM_CELL</option>
-              <option value="UNKNOWN">UNKNOWN / SYSTEM</option>
-            </select>
+              <span>{scopeRole}</span>
+              <span className="text-[9px] font-bold normal-case tracking-normal opacity-70">
+                your role only
+              </span>
+            </div>
           </div>
 
           {/* Action Filter */}
@@ -188,11 +236,15 @@ export const AuditLogView: React.FC = () => {
         </div>
 
         {/* Filter Summary */}
-        <div className="flex items-center justify-between text-xs text-[#64748B] pt-2 border-t border-[#F1F5F9]">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#64748B] pt-2 border-t border-[#F1F5F9]">
           <span>
-            Displaying <strong>{logs.length}</strong> recorded audit events
+            Displaying <strong>{logs.length}</strong> <strong>{scopeRole}</strong> audit{' '}
+            {logs.length === 1 ? 'event' : 'events'}
           </span>
-          {(search || role || action || status) && (
+          <span className="text-[10px] text-[#94A3B8]">
+            This page never shows {scopeRole === 'SUPER_ADMIN' ? 'Exam Cell' : 'Super Admin'} activity.
+          </span>
+          {(search || action || status) && (
             <button
               onClick={handleResetFilters}
               className="font-bold text-[#D71945] hover:underline cursor-pointer"
@@ -201,6 +253,12 @@ export const AuditLogView: React.FC = () => {
             </button>
           )}
         </div>
+
+        {loadError && (
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-xs font-semibold text-red-800">
+            {loadError}
+          </div>
+        )}
       </div>
 
       {/* Logs Table */}
@@ -213,9 +271,12 @@ export const AuditLogView: React.FC = () => {
         ) : logs.length === 0 ? (
           <div className="p-12 text-center">
             <Clock className="h-10 w-10 text-slate-300 mx-auto mb-3" />
-            <h3 className="text-sm font-bold text-[#111827]">No audit logs recorded</h3>
+            <h3 className="text-sm font-bold text-[#111827]">
+              No {scopeRole} audit logs recorded
+            </h3>
             <p className="mt-1 text-xs text-[#64748B] max-w-sm mx-auto">
-              No audit records matched your filter criteria or no actions have been performed yet.
+              No {scopeRole} audit records matched your filter criteria or no actions have been
+              performed yet.
             </p>
           </div>
         ) : (

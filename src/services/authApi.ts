@@ -320,6 +320,11 @@ export interface AuditLog {
 
 export interface AuditLogFilters {
   search?: string;
+  /**
+   * The viewer's OWN role, for display only.
+   * It is never sent to the API: the backend derives the scope from the
+   * verified JWT and ignores (and rejects) any client-supplied role.
+   */
   role?: string;
   action?: string;
   status?: string;
@@ -328,11 +333,17 @@ export interface AuditLogFilters {
   limit?: number;
 }
 
+/**
+ * Loads the audit log.
+ *
+ * The response is already restricted to the signed-in user's own role by the
+ * backend, so this client never receives the other role's records. `role` is
+ * intentionally NOT sent as a query parameter — the role is server-derived.
+ */
 export async function fetchAuditLogs(filters: AuditLogFilters = {}, token: string): Promise<AuditLog[]> {
   try {
     const params = new URLSearchParams();
     if (filters.search) params.set('search', filters.search);
-    if (filters.role) params.set('role', filters.role);
     if (filters.action) params.set('action', filters.action);
     if (filters.status) params.set('status', filters.status);
     if (filters.from) params.set('from', filters.from);
@@ -342,10 +353,14 @@ export async function fetchAuditLogs(filters: AuditLogFilters = {}, token: strin
     const res = await fetch(url, {
       headers: { 'Accept': 'application/json', Authorization: `Bearer ${token}` }
     });
+    if (res.status === 403) {
+      throw new Error('You are not authorized to view audit logs.');
+    }
     if (!res.ok) return [];
     const data = await safeJsonParse<any>(res, 'GET /audit-logs');
     return Array.isArray(data) ? data : [];
-  } catch {
+  } catch (err: any) {
+    if (err?.message) throw err;
     return [];
   }
 }

@@ -17,7 +17,6 @@ import {
   Eye,
   FileText,
   Layers,
-  ChevronRight,
   Sliders,
   Maximize2,
   ChevronDown,
@@ -224,7 +223,6 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
     partBQuestions?: PaperQuestionItem[];
     partCQuestions?: PaperQuestionItem[];
     hasSignatures: boolean;
-    nextPageHint?: string;
   }
 
   const generateSheets = (): SheetDefinition[] => {
@@ -267,7 +265,6 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
             }
           ],
           hasSignatures: false,
-          nextPageHint: 'Turn Over to Sheet 2 for Part B (Section B) & Verification'
         },
         {
           sheetNumber: 2,
@@ -297,7 +294,6 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
           hasContinuationHeader: false,
           partAQuestions: partA,
           hasSignatures: false,
-          nextPageHint: 'Turn Over to Sheet 2 for Part B (Q11 to Q15)'
         },
         {
           sheetNumber: 2,
@@ -307,7 +303,6 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
           partAQuestions: [],
           partBQuestions: partB,
           hasSignatures: false,
-          nextPageHint: 'Turn Over to Sheet 3 for Part C & Signatures'
         },
         {
           sheetNumber: 3,
@@ -332,7 +327,6 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
         partAQuestions: partA,
         partBQuestions: partB.slice(0, 4), // Units 1 & 2 (Q11.a, Q11.b, Q12.a, Q12.b)
         hasSignatures: false,
-        nextPageHint: 'Turn Over to Sheet 2 for Remaining Questions & Part C'
       },
       {
         sheetNumber: 2,
@@ -931,12 +925,11 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
               <div className="border-b-2 border-black pb-3 mb-6">
                 <div className="flex items-center justify-between text-xs font-bold uppercase">
                   <span>MOHAMED SATHAK A J COLLEGE OF ENGINEERING (AUTONOMOUS)</span>
-                  <span className="font-mono text-black font-extrabold">Page {sheet.sheetNumber} of {totalSheets}</span>
+                  <span>{paper.examType}</span>
                 </div>
                 <div className="flex items-center justify-between text-[11px] font-semibold text-slate-700 mt-1 border-t border-black pt-1">
                   <span>QP Code: <strong className="text-black font-mono">{paper.paperCode}</strong></span>
                   <span className="font-bold text-black">{paper.subjectCode} – {paper.subjectName}</span>
-                  <span>{paper.examType}</span>
                 </div>
               </div>
             )}
@@ -1172,20 +1165,6 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
             )}
 
             {/* ======================================================== */}
-            {/* NEXT SHEET TURN-OVER HINT (If more sheets follow) */}
-            {/* ======================================================== */}
-            {sheet.nextPageHint && (
-              <div className="mt-8 pt-4 border-t border-dashed border-slate-300 flex items-center justify-between text-xs font-bold text-slate-700">
-                <span className="text-[11px] text-slate-500 italic">
-                  [ End of Sheet {sheet.sheetNumber} ]
-                </span>
-                <span className="font-extrabold text-[#D71945] flex items-center gap-1">
-                  {sheet.nextPageHint} <ChevronRight className="h-3.5 w-3.5" />
-                </span>
-              </div>
-            )}
-
-            {/* ======================================================== */}
             {/* AUDIT SIGNATURES & TABLE OF SPECIFICATION (TOS) */}
             {/* ======================================================== */}
             {sheet.hasSignatures && (
@@ -1256,13 +1235,6 @@ export const PaperPreview: React.FC<PaperPreviewProps> = ({ paper, onBack }) => 
                 )}
               </div>
             )}
-
-              {/* Sheet Footer with Page Numbers */}
-              <div className="mt-8 pt-2 border-t border-slate-200 flex items-center justify-between text-[10px] text-slate-500 font-mono">
-                <span>MSAJCE Autonomous Examination</span>
-                <span>Question Paper Code: {paper.paperCode}</span>
-                <span className="font-bold text-slate-800">Page {sheet.sheetNumber} of {totalSheets}</span>
-              </div>
             </div>
           </div>
         ))}

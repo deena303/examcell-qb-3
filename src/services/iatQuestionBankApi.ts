@@ -152,7 +152,17 @@ export interface UnitRequest {
   partBC: number;
 }
 
-export interface PreviewRequest {
+/**
+ * The subject identity a subject is ONLY ever identified by.
+ * The server verifies the source bank against this before selecting anything.
+ */
+export interface SubjectIdentitySelection {
+  academicYear?: string;
+  department?: string;
+  subjectCode?: string;
+}
+
+export interface PreviewRequest extends SubjectIdentitySelection {
   sourceQuestionBankId: string;
   /** Required for global mode. Ignored (set to 0) when unitRequests is provided. */
   requestedPartA: number;
@@ -178,7 +188,7 @@ export async function generateIatPreview(
   return data.preview;
 }
 
-export interface SaveRequest {
+export interface SaveRequest extends SubjectIdentitySelection {
   sourceQuestionBankId: string;
   requestedPartA: number;
   requestedPartBC: number;

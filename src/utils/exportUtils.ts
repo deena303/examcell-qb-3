@@ -1161,14 +1161,40 @@ export function executeNativePrint(
  * "24AM411 – Artificial Intelligence – IAT Bank 01" → "24AM411_IAT_Bank_01"
  */
 function iatBankFileName(bank: IatGeneratedBankDetail, ext: 'pdf' | 'docx'): string {
-  // Try to extract subject code and sequence from the name
-  const name = bank.name || '';
-  // e.g. "24AM411 – Artificial Intelligence – IAT Bank 01"
-  const parts = name.split(/\s*[–\-—]\s*/);
-  const subjectCode = (parts[0] || bank.subjectCode || 'BANK').trim().replace(/\s+/g, '_');
+  // The COMPLETE subject code from the database is always the leading part.
+  // Parsing the name is only a fallback for the trailing sequence label.
+  const subjectCode = resolveQuestionBankSubjectCode(bank);
+  const parts = (bank.name || '').split(/\s*[–\-—]\s*/);
   const lastPart = (parts[parts.length - 1] || '').trim().replace(/\s+/g, '_');
-  const base = lastPart ? `${subjectCode}_${lastPart}` : subjectCode;
+  const base = lastPart && lastPart !== subjectCode ? `${subjectCode}_${lastPart}` : subjectCode;
   return `${base}.${ext}`;
+}
+
+/**
+ * The COMPLETE subject code of a question bank, exactly as stored in the
+ * database. Never truncated, never derived from a split of the bank name, and
+ * never hardcoded.
+ */
+export function resolveQuestionBankSubjectCode(bank: {
+  subjectCode?: string | null;
+  name?: string | null;
+}): string {
+  const fromRecord = String(bank?.subjectCode || '').trim();
+  if (fromRecord) return fromRecord;
+  // Fallback: the name always begins with the subject code.
+  const firstPart = String(bank?.name || '').split(/\s*[–\-—]\s*/)[0] || '';
+  return firstPart.trim() || 'QUESTION BANK';
+}
+
+/** The COMPLETE subject name of a question bank, from the database record. */
+export function resolveQuestionBankSubjectName(bank: {
+  subjectName?: string | null;
+  name?: string | null;
+}): string {
+  const fromRecord = String(bank?.subjectName || '').trim();
+  if (fromRecord) return fromRecord;
+  const parts = String(bank?.name || '').split(/\s*[–\-—]\s*/);
+  return (parts[1] || '').trim() || '';
 }
 
 /** Groups and sorts questions unit-wise, then by part. */
@@ -1209,11 +1235,11 @@ export function generateIatBankHtml(bank: IatGeneratedBankDetail): string {
       const partCCount = g.partC.length;
       return `
         <tr>
-          <td style="padding:6px 12px; font-weight:bold; text-align:center;">UNIT ${UNIT_ROMAN[u] || u}</td>
-          <td style="padding:6px 12px; text-align:center;">${partACount}</td>
-          <td style="padding:6px 12px; text-align:center;">${partBCount}</td>
-          <td style="padding:6px 12px; text-align:center;">${partCCount || '–'}</td>
-          <td style="padding:6px 12px; text-align:center; font-weight:bold;">${partACount + partBCount + partCCount}</td>
+          <td style="padding:6px 12px; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; text-align:center;">UNIT ${UNIT_ROMAN[u] || u}</td>
+          <td style="padding:6px 12px; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center;">${partACount}</td>
+          <td style="padding:6px 12px; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center;">${partBCount}</td>
+          <td style="padding:6px 12px; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center;">${partCCount || '\u2013'}</td>
+          <td style="padding:6px 12px; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center; font-weight:bold;">${partACount + partBCount + partCCount}</td>
         </tr>`;
     }).join('');
 
@@ -1227,27 +1253,25 @@ export function generateIatBankHtml(bank: IatGeneratedBankDetail): string {
         if (qs.length === 0) return '';
         const rows = qs.map((q, i) => `
           <tr>
-            <td style="padding:6px 8px; vertical-align:top; font-weight:bold; white-space:nowrap; color:#64748B; width:28px;">${i + 1}.</td>
-            <td style="padding:6px 8px; vertical-align:top; line-height:1.6;">${esc(q.questionText)}</td>
-            <td style="padding:6px 8px; vertical-align:top; text-align:center; white-space:nowrap; color:#374151;">${q.marks ?? '–'}</td>
-            <td style="padding:6px 8px; vertical-align:top; text-align:center; white-space:nowrap; font-family:monospace; color:#374151;">${esc(q.btl || q.bloomsLevel || '–')}</td>
-            <td style="padding:6px 8px; vertical-align:top; text-align:center; white-space:nowrap; font-family:monospace; color:#374151;">${esc(q.co || '–')}</td>
-            <td style="padding:6px 8px; vertical-align:top; text-align:center; white-space:nowrap; font-size:10px; color:#94A3B8;">${esc(q.sourceQuestionNumber || '–')}</td>
+            <td style="padding:6px 8px; vertical-align:top; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; white-space:nowrap; color:#111827; width:28px;">${i + 1}.</td>
+            <td style="padding:6px 8px; vertical-align:top; font-family:'Times New Roman',Times,serif; font-size:12pt; line-height:1.5;">${esc(q.questionText)}</td>
+            <td style="padding:6px 8px; vertical-align:top; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center; white-space:nowrap; color:#111827;">${q.marks ?? '\u2013'}</td>
+            <td style="padding:6px 8px; vertical-align:top; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center; white-space:nowrap; color:#111827;">${esc(q.btl || q.bloomsLevel || '\u2013')}</td>
+            <td style="padding:6px 8px; vertical-align:top; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center; white-space:nowrap; color:#111827;">${esc(q.co || '\u2013')}</td>
           </tr>`).join('');
 
         return `
           <div style="margin-bottom:18px;">
-            <div style="font-weight:800; font-size:12.5pt; letter-spacing:0.04em; text-transform:uppercase; color:#1E293B; margin-bottom:4px;">${label}</div>
-            <div style="font-size:9.5pt; color:#64748B; margin-bottom:10px; font-style:italic;">${sublabel}</div>
-            <table style="width:100%; border-collapse:collapse; font-size:10pt;">
+            <div style="font-family:'Times New Roman',Times,serif; font-weight:bold; font-size:13pt; letter-spacing:0.04em; text-transform:uppercase; color:#1E293B; margin-bottom:4px;">${label}</div>
+            <div style="font-family:'Times New Roman',Times,serif; font-size:12pt; color:#374151; margin-bottom:10px; font-style:italic;">${sublabel}</div>
+            <table style="width:100%; border-collapse:collapse; font-family:'Times New Roman',Times,serif; font-size:12pt;">
               <thead>
                 <tr style="background:#F7F8FA; border-bottom:1px solid #E5E7EB;">
-                  <th style="padding:5px 8px; text-align:center; font-size:9px; color:#94A3B8; text-transform:uppercase; width:28px;">#</th>
-                  <th style="padding:5px 8px; text-align:left; font-size:9px; color:#94A3B8; text-transform:uppercase;">Question</th>
-                  <th style="padding:5px 8px; text-align:center; font-size:9px; color:#94A3B8; text-transform:uppercase; width:50px;">Marks</th>
-                  <th style="padding:5px 8px; text-align:center; font-size:9px; color:#94A3B8; text-transform:uppercase; width:50px;">BTL</th>
-                  <th style="padding:5px 8px; text-align:center; font-size:9px; color:#94A3B8; text-transform:uppercase; width:50px;">CO</th>
-                  <th style="padding:5px 8px; text-align:center; font-size:9px; color:#94A3B8; text-transform:uppercase; width:60px;">Source</th>
+                  <th style="padding:5px 8px; text-align:center; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; text-transform:uppercase; width:28px;">#</th>
+                  <th style="padding:5px 8px; text-align:left; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; text-transform:uppercase;">Question</th>
+                  <th style="padding:5px 8px; text-align:center; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; text-transform:uppercase; width:56px;">Marks</th>
+                  <th style="padding:5px 8px; text-align:center; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; text-transform:uppercase; width:56px;">BTL</th>
+                  <th style="padding:5px 8px; text-align:center; font-family:'Times New Roman',Times,serif; font-size:12pt; font-weight:bold; text-transform:uppercase; width:56px;">CO</th>
                 </tr>
               </thead>
               <tbody>${rows}</tbody>
@@ -1262,8 +1286,8 @@ export function generateIatBankHtml(bank: IatGeneratedBankDetail): string {
       return `
         <div style="page-break-before:${u > 1 ? 'always' : 'auto'}; margin-bottom:32px;">
           <div style="background:#1E293B; color:#fff; padding:10px 16px; border-radius:6px; margin-bottom:20px;">
-            <div style="font-size:14pt; font-weight:900; letter-spacing:0.08em; text-transform:uppercase;">
-              UNIT – ${roman}
+            <div style="font-family:'Times New Roman',Times,serif; font-size:14pt; font-weight:bold; letter-spacing:0.08em; text-transform:uppercase;">
+              UNIT \u2013 ${roman}
             </div>
           </div>
           ${partAHtml}
@@ -1277,20 +1301,26 @@ export function generateIatBankHtml(bank: IatGeneratedBankDetail): string {
   const totalPartC = bank.actualPartCCount;
   const academicYear = esc(bank.academicYear || '');
   const department = esc(bank.department || '');
-  const subjectCode = esc(bank.subjectCode);
-  const subjectName = esc(bank.subjectName || '');
+  // The COMPLETE subject code and name, exactly as stored in the database.
+  // Never truncated, never hardcoded, never re-derived from the bank name.
+  const subjectCode = esc(resolveQuestionBankSubjectCode(bank));
+  const subjectName = esc(resolveQuestionBankSubjectName(bank));
+  const subjectHeading = subjectName ? `${subjectCode} - ${subjectName}` : subjectCode;
+  // Generic "QUESTION BANK" — never "IAT QUESTION BANK" unless the user asked
+  // for an IAT-specific output elsewhere.
+  const documentTitle = 'QUESTION BANK';
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>${subjectCode} – IAT Generated Question Bank</title>
+  <title>${subjectHeading}</title>
   <style>
     @page { size: A4 portrait; margin: 15mm 18mm 15mm 18mm; }
     * { box-sizing: border-box; }
     body {
-      font-family: "Times New Roman", Times, Georgia, serif;
-      font-size: 10.5pt;
+      font-family: "Times New Roman", Times, serif;
+      font-size: 12pt;
       line-height: 1.5;
       color: #111827;
       background: #fff;
@@ -1312,16 +1342,17 @@ export function generateIatBankHtml(bank: IatGeneratedBankDetail): string {
     .print-bar button.sec:hover { background: #1f2937; }
     .paper-container { max-width: 820px; margin: 20px auto; padding: 24px 32px; background: #fff; }
     .college-header { text-align: center; border-bottom: 2.5px double #1E293B; padding-bottom: 14px; margin-bottom: 18px; }
-    .college-name { font-size: 15pt; font-weight: 900; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
-    .college-sub { font-size: 9.5pt; color: #374151; margin-bottom: 6px; }
-    .doc-title { font-size: 13pt; font-weight: 900; text-transform: uppercase; letter-spacing: 0.08em; margin: 10px 0 4px; }
-    .bank-name { font-size: 11pt; font-weight: 700; color: #1976D2; margin-top: 4px; }
-    .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 20px; margin: 14px 0 18px; border: 1px solid #E5E7EB; border-radius: 8px; padding: 12px 16px; background: #F9FAFB; font-size: 9.5pt; }
-    .meta-grid .k { font-weight: 700; color: #374151; }
+    .college-name { font-family: "Times New Roman", Times, serif; font-size: 15pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+    .college-sub { font-family: "Times New Roman", Times, serif; font-size: 12pt; color: #374151; margin-bottom: 6px; }
+    .doc-title { font-family: "Times New Roman", Times, serif; font-size: 14pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.08em; margin: 10px 0 4px; }
+    .bank-subject { font-family: "Times New Roman", Times, serif; font-size: 12pt; font-weight: bold; text-transform: uppercase; margin-top: 4px; word-break: break-word; }
+    .bank-name { font-family: "Times New Roman", Times, serif; font-size: 12pt; font-weight: bold; color: #1976D2; margin-top: 4px; }
+    .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 20px; margin: 14px 0 18px; border: 1px solid #E5E7EB; border-radius: 8px; padding: 12px 16px; background: #F9FAFB; font-family: "Times New Roman", Times, serif; font-size: 12pt; }
+    .meta-grid .k { font-weight: bold; color: #374151; }
     .meta-grid .v { color: #111827; }
-    .summary-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 9.5pt; }
+    .summary-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-family: "Times New Roman", Times, serif; font-size: 12pt; }
     .summary-table th, .summary-table td { border: 1px solid #E5E7EB; }
-    .summary-table th { background: #F1F5F9; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; padding: 6px 10px; color: #475569; }
+    .summary-table th { background: #F1F5F9; font-family: "Times New Roman", Times, serif; font-size: 12pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.05em; padding: 6px 10px; color: #475569; }
     .divider { border: none; border-top: 2px dashed #CBD5E1; margin: 28px 0; }
     @media print {
       .print-bar { display: none !important; }
@@ -1331,7 +1362,7 @@ export function generateIatBankHtml(bank: IatGeneratedBankDetail): string {
 </head>
 <body>
   <div class="print-bar">
-    <span style="font-weight:700;">IAT Question Bank — ${subjectCode}</span>
+    <span style="font-weight:700;">${documentTitle} — ${subjectCode}</span>
     <div>
       <button class="sec" onclick="window.close()">✕ Close</button>
       <button onclick="window.print()">🖨 Print / Save PDF</button>
@@ -1340,9 +1371,10 @@ export function generateIatBankHtml(bank: IatGeneratedBankDetail): string {
 
   <div class="paper-container">
     <div class="college-header">
-      <div class="college-name">Mohamed Sathak A.J. College of Engineering</div>
+      <div class="college-name">Mohamed Sathak AJ College of Engineering and Architecture</div>
       <div class="college-sub">Affiliated to Anna University | Approved by AICTE | NBA Accredited</div>
-      <div class="doc-title">IAT Question Bank</div>
+      <div class="doc-title">${documentTitle}</div>
+      <div class="bank-subject">${subjectHeading}</div>
       <div class="bank-name">${esc(bank.name)}</div>
     </div>
 
@@ -1367,12 +1399,12 @@ export function generateIatBankHtml(bank: IatGeneratedBankDetail): string {
       </thead>
       <tbody>
         ${unitSummaryRows}
-        <tr style="background:#F1F5F9; font-weight:900;">
-          <td style="padding:6px 12px; text-align:center;">TOTAL</td>
-          <td style="padding:6px 12px; text-align:center;">${totalPartA}</td>
-          <td style="padding:6px 12px; text-align:center;">${totalPartB}</td>
-          <td style="padding:6px 12px; text-align:center;">${totalPartC || '–'}</td>
-          <td style="padding:6px 12px; text-align:center;">${bank.totalQuestions}</td>
+        <tr style="background:#F1F5F9; font-weight:bold;">
+          <td style="padding:6px 12px; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center; font-weight:bold;">TOTAL</td>
+          <td style="padding:6px 12px; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center;">${totalPartA}</td>
+          <td style="padding:6px 12px; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center;">${totalPartB}</td>
+          <td style="padding:6px 12px; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center;">${totalPartC || '\u2013'}</td>
+          <td style="padding:6px 12px; font-family:'Times New Roman',Times,serif; font-size:12pt; text-align:center;">${bank.totalQuestions}</td>
         </tr>
       </tbody>
     </table>
@@ -1417,7 +1449,7 @@ export function exportIatBankWord(bank: IatGeneratedBankDetail): void {
   const wordHtml = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
 <head>
   <meta charset="utf-8">
-  <title>${(bank.subjectCode || 'IAT').replace(/[<>"]/g, '')} - ${(bank.name || 'IAT Bank').replace(/[<>"]/g, '')}</title>
+  <title>${resolveQuestionBankSubjectCode(bank)} - ${(bank.name || 'Question Bank').replace(/[<>"]/g, '')}</title>
   <!--[if gte mso 9]>
   <xml>
     <w:WordDocument>

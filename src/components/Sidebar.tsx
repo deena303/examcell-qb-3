@@ -41,6 +41,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen, setMobileOpen }) =
   } = useApp();
 
   // ---- Exam Cell navigation items ----
+  // The "Super Admin Management" section reuses the SAME Super Admin screens,
+  // services and APIs the Super Admin portal uses. Nothing is duplicated: the
+  // tab ids are identical, so App.tsx simply renders the same component.
   const examCellSections = [
     {
       title: 'Main Menu',
@@ -50,7 +53,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen, setMobileOpen }) =
         { id: 'question-bank', label: 'Question Bank', icon: Database },
         { id: 'iat-question-bank-generator', label: 'IAT Question Bank Generator', icon: GitBranch, highlight: true },
         { id: 'iat-generated-banks', label: 'IAT Generated Banks', icon: Layers },
-        { id: 'exam-patterns', label: 'Exam Patterns', icon: Sliders },
         { id: 'internal-config', label: 'IA Configuration', icon: SlidersHorizontal },
         { id: 'generate-paper', label: 'Generate Paper', icon: Sparkles, highlight: true },
         { id: 'generated-papers', label: 'Generated Papers', icon: FileCheck2 },
@@ -59,17 +61,20 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen, setMobileOpen }) =
       ]
     },
     {
-      title: 'Master Data',
+      title: 'Super Admin Management',
       items: [
+        { id: 'master-subjects', label: 'Subject Management', icon: BookOpen },
         { id: 'academic-years', label: 'Academic Years', icon: CalendarDays },
         { id: 'departments', label: 'Departments', icon: Building2 },
-        { id: 'subject-bank', label: 'Subject Bank', icon: BookOpen },
+        { id: 'exam-patterns', label: 'System Configuration', icon: Sliders },
+        { id: 'users', label: 'User Accounts', icon: Users },
+        { id: 'audit-logs', label: 'Audit Logs', icon: ShieldCheck },
       ]
     },
     {
-      title: 'Administration',
+      title: 'Master Data',
       items: [
-        { id: 'audit-logs', label: 'Audit Logs', icon: ShieldCheck },
+        { id: 'subject-bank', label: 'Subject Bank', icon: BookOpen },
       ]
     },
     {
@@ -82,6 +87,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen, setMobileOpen }) =
   ];
 
   // ---- Principal Portal (Spec §8) — focused on approval ----
+  // NOTE: no "Audit Logs" entry. The audit log is strictly role-scoped: only
+  // EXAM_CELL and SUPER_ADMIN may read it, and each sees only their own role's
+  // records. The Principal role is denied by the API.
   const principalSections = [
     {
       title: 'Principal Portal',
@@ -90,7 +98,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen, setMobileOpen }) =
         { id: 'principal-requests', label: 'Additional Paper Requests', icon: ClipboardCheck, highlight: true },
         { id: 'principal-papers', label: 'Generated / Assigned Papers', icon: FileCheck2 },
         { id: 'principal-notifications', label: 'Notifications', icon: BellRing },
-        { id: 'audit-logs', label: 'Audit Logs', icon: ShieldCheck },
       ]
     },
     {

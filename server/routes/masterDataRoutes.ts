@@ -52,7 +52,7 @@ router.get('/academic-years', async (req: AuthenticatedRequest, res: Response) =
   }
 });
 
-router.post('/academic-years', requireAuth, requireRole('SUPER_ADMIN'), async (req: AuthenticatedRequest, res: Response) => {
+router.post('/academic-years', requireAuth, requireRole('SUPER_ADMIN', 'EXAM_CELL'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { year_label, status, start_year, end_year } = req.body;
     if (!year_label) return res.status(400).json({ error: 'year_label is required.' });
@@ -76,7 +76,7 @@ router.post('/academic-years', requireAuth, requireRole('SUPER_ADMIN'), async (r
   }
 });
 
-router.put('/academic-years/:id', requireAuth, requireRole('SUPER_ADMIN'), async (req: AuthenticatedRequest, res: Response) => {
+router.put('/academic-years/:id', requireAuth, requireRole('SUPER_ADMIN', 'EXAM_CELL'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { year_label, status, start_year, end_year } = req.body;
@@ -97,7 +97,7 @@ router.put('/academic-years/:id', requireAuth, requireRole('SUPER_ADMIN'), async
   }
 });
 
-router.delete('/academic-years/:id', requireAuth, requireRole('SUPER_ADMIN'), async (req: AuthenticatedRequest, res: Response) => {
+router.delete('/academic-years/:id', requireAuth, requireRole('SUPER_ADMIN', 'EXAM_CELL'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
     const client = getSupabaseClient();
@@ -131,7 +131,7 @@ router.get('/departments', async (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
-router.post('/departments', requireAuth, requireRole('SUPER_ADMIN'), async (req: AuthenticatedRequest, res: Response) => {
+router.post('/departments', requireAuth, requireRole('SUPER_ADMIN', 'EXAM_CELL'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { department_code, department_name, short_name, hod_name, is_common, status } = req.body;
     if (!department_code || !department_name) return res.status(400).json({ error: 'department_code and department_name are required.' });
@@ -152,7 +152,7 @@ router.post('/departments', requireAuth, requireRole('SUPER_ADMIN'), async (req:
   }
 });
 
-router.put('/departments/:id', requireAuth, requireRole('SUPER_ADMIN'), async (req: AuthenticatedRequest, res: Response) => {
+router.put('/departments/:id', requireAuth, requireRole('SUPER_ADMIN', 'EXAM_CELL'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { department_code, department_name, short_name, hod_name, is_common, status } = req.body;
@@ -176,7 +176,7 @@ router.put('/departments/:id', requireAuth, requireRole('SUPER_ADMIN'), async (r
   }
 });
 
-router.delete('/departments/:id', requireAuth, requireRole('SUPER_ADMIN'), async (req: AuthenticatedRequest, res: Response) => {
+router.delete('/departments/:id', requireAuth, requireRole('SUPER_ADMIN', 'EXAM_CELL'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
     const client = getSupabaseClient();

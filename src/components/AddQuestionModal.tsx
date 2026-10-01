@@ -15,12 +15,18 @@ interface AddQuestionModalProps {
   isOpen: boolean;
   onClose: () => void;
   editingQuestion?: Question | null;
+  /**
+   * Called after a question is added or edited.
+   * Lets a database-backed list reflect the change immediately.
+   */
+  onSaved?: (questionId: string, patch: Partial<Question>) => void;
 }
 
 export const AddQuestionModal: React.FC<AddQuestionModalProps> = ({
   isOpen,
   onClose,
-  editingQuestion
+  editingQuestion,
+  onSaved
 }) => {
   const { subjects, addQuestion, updateQuestion, selectedSubjectCode, currentUser } = useApp();
 
@@ -62,37 +68,26 @@ export const AddQuestionModal: React.FC<AddQuestionModalProps> = ({
     e.preventDefault();
     if (!questionText.trim()) return;
 
+    const payload = {
+      subjectCode,
+      unit,
+      topic,
+      part,
+      marks,
+      questionText,
+      bloomsLevel,
+      co,
+      pi,
+      difficulty,
+      allowedFor,
+      status,
+    };
+
     if (editingQuestion) {
-      updateQuestion(editingQuestion.id, {
-        subjectCode,
-        unit,
-        topic,
-        part,
-        marks,
-        questionText,
-        bloomsLevel,
-        co,
-        pi,
-        difficulty,
-        allowedFor,
-        status,
-      });
+      updateQuestion(editingQuestion.id, payload);
+      onSaved?.(editingQuestion.id, payload);
     } else {
-      addQuestion({
-        subjectCode,
-        unit,
-        topic,
-        part,
-        marks,
-        questionText,
-        bloomsLevel,
-        co,
-        pi,
-        difficulty,
-        allowedFor,
-        status,
-        createdBy: currentUser.name,
-      });
+      addQuestion({ ...payload, createdBy: currentUser.name });
     }
     onClose();
   };
